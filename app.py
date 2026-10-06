@@ -1,39 +1,73 @@
 import os
+import csv
+import io
 from datetime import datetime, date
+from decimal import Decimal
 from functools import wraps
 
-from flask import Flask, request, redirect, url_for, session, render_template_string, flash
-from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, func
+from flask import (
+    Flask,
+    request,
+    redirect,
+    url_for,
+    session,
+    render_template_string,
+    flash,
+)
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Numeric,
+    Date,
+    DateTime,
+    func,
+)
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 
+
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
+
 app = Flask(__name__)
 
-app.secret_key = os.getenv(
-    "SECRET_KEY",
-    "change-this-secret-key"
-)
+SECRET_KEY = os.getenv("SECRET_KEY")
+
+if not SECRET_KEY:
+    SECRET_KEY = "troque-esta-chave-no-render"
+
+app.secret_key = SECRET_KEY
 
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
 
 if not DATABASE_URL:
     raise RuntimeError(
-        "DATABASE_URL não configurada no Render."
+        "DATABASE_URL não configurada. "
+        "Adicione o banco PostgreSQL nas Environment Variables do Render."
     )
 
+# Compatibilidade com URLs antigas do Render
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace(
         "postgres://",
         "postgresql+psycopg://",
-        1
+        1,
     )
 
 elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace(
         "postgresql://",
         "postgresql+psycopg://",
-        1
+        1,
     )
+
+
+# ============================================================
+# BANCO DE DADOS
+# ============================================================
 
 engine = create_engine(
     DATABASE_URL,
@@ -43,1214 +77,781 @@ engine = create_engine(
     max_overflow=5,
 )
 
-Base = declarative_base()
-
 SessionLocal = sessionmaker(
     bind=engine,
     autoflush=False,
     autocommit=False,
 )
 
-
-ADMIN_USER = os.getenv(
-    "ADMIN_USER",
-    "admin"
-)
-
-ADMIN_PASSWORD = os.getenv(
-    "ADMIN_PASSWORD",
-    "admin123"
-)
+Base = declarative_base()
 
 
 class Cliente(Base):
-
     __tablename__ = "clientes"
 
-    id = Column(
-        Integer,
-        primary_key=True
-    )
+    id = Column(Integer, primary_key=True)
 
     nome = Column(
         String(150),
-        nullable=False
+        nullable=False,
     )
 
     usuario = Column(
         String(150),
         nullable=False,
         unique=True,
-        index=True
+        index=True,
     )
 
     valor = Column(
-        Float,
+        Numeric(10, 2),
         nullable=False,
-        default=0.0
+        default=0,
     )
 
     vencimento = Column(
         Date,
-        nullable=True
+        nullable=True,
     )
 
     status = Column(
         String(20),
         nullable=False,
         default="Pendente",
-        index=True
+        index=True,
     )
 
     data_pagamento = Column(
         DateTime,
-        nullable=True
+        nullable=True,
     )
 
     criado_em = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow
+        default=datetime.utcnow,
     )
 
 
-Base.metadata.create_all(
-    bind=engine
+# Cria a tabela automaticamente
+Base.metadata.create_all(bind=engine)
+
+
+# ============================================================
+# LOGIN ADMINISTRADOR
+# ============================================================
+
+ADMIN_USER = os.getenv(
+    "ADMIN_USER",
+    "admin",
+)
+
+ADMIN_PASSWORD = os.getenv(
+    "ADMIN_PASSWORD",
+    "admin123",
 )
 
 
-def login_required(view):
-
-    @wraps(view)
-    def wrapped(*args, **kwargs):
-
+def login_required(function):
+    @wraps(function)
+    def decorated_function(*args, **kwargs):
         if not session.get("logged_in"):
-            return redirect(
-                url_for("login")
-            )
+            return redirect(url_for("login"))
 
-        return view(
-            *args,
-            **kwargs
-        )
+        return function(*args, **kwargs)
 
-    return wrapped
+    return decorated_function
 
+
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
 
 def dinheiro(valor):
+    if valor is None:
+        valor = 0
 
-    return (
-        f"R$ {float(valor or 0):,.2f}"
-        .replace(",", "X")
-        .replace(".", ",")
-        .replace("X", ".")
+    try:
+        valor = Decimal(str(valor))
+    except Exception:
+        valor = Decimal("0")
+
+    texto = f"{valor:,.2f}"
+
+    return "R$ " + texto.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def formatar_data(valor):
+    if not valor:
+        return "-"
+
+    if isinstance(valor, datetime):
+        return valor.strftime("%d/%m/%Y")
+
+    if isinstance(valor, date):
+        return valor.strftime("%d/%m/%Y")
+
+    return str(valor)
+
+
+def parse_valor(valor):
+    if valor is None:
+        return Decimal("0.00")
+
+    valor = str(valor).strip()
+
+    if not valor:
+        return Decimal("0.00")
+
+    # Aceita:
+    # 25
+    # 25.50
+    # 25,50
+    # R$ 25,50
+    valor = (
+        valor.replace("R$", "")
+        .replace(" ", "")
+        .strip()
     )
 
+    if "," in valor and "." in valor:
+        valor = valor.replace(".", "")
+        valor = valor.replace(",", ".")
 
-def obter_resumo(db):
+    elif "," in valor:
+        valor = valor.replace(",", ".")
 
-    total = (
-        db.query(
-            func.count(Cliente.id)
-        ).scalar()
-        or 0
-    )
-
-    pagos = (
-        db.query(
-            func.count(Cliente.id)
-        )
-        .filter(
-            Cliente.status == "Pago"
-        )
-        .scalar()
-        or 0
-    )
-
-    pendentes = (
-        db.query(
-            func.count(Cliente.id)
-        )
-        .filter(
-            Cliente.status == "Pendente"
-        )
-        .scalar()
-        or 0
-    )
-
-    recebido = (
-        db.query(
-            func.coalesce(
-                func.sum(Cliente.valor),
-                0
-            )
-        )
-        .filter(
-            Cliente.status == "Pago"
-        )
-        .scalar()
-        or 0
-    )
-
-    pendente_valor = (
-        db.query(
-            func.coalesce(
-                func.sum(Cliente.valor),
-                0
-            )
-        )
-        .filter(
-            Cliente.status == "Pendente"
-        )
-        .scalar()
-        or 0
-    )
-
-    return {
-        "total": total,
-        "pagos": pagos,
-        "pendentes": pendentes,
-        "recebido": float(recebido),
-        "pendente_valor": float(
-            pendente_valor
-        ),
-        "previsto": float(recebido)
-        + float(pendente_valor),
-    }
+    try:
+        return Decimal(valor)
+    except Exception:
+        return Decimal("0.00")
 
 
-BASE = r"""
-<!doctype html>
+def parse_data(valor):
+    if not valor:
+        return None
 
+    valor = str(valor).strip()
+
+    formatos = [
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+    ]
+
+    for formato in formatos:
+        try:
+            return datetime.strptime(
+                valor,
+                formato,
+            ).date()
+        except ValueError:
+            pass
+
+    return None
+
+
+def obter_cliente(db, cliente_id):
+    return db.query(Cliente).filter(
+        Cliente.id == cliente_id
+    ).first()
+
+
+# ============================================================
+# TEMPLATE PRINCIPAL
+# ============================================================
+
+BASE_HTML = """
+<!DOCTYPE html>
 <html lang="pt-BR">
 
 <head>
 
-<meta charset="utf-8">
+<meta charset="UTF-8">
 
 <meta
     name="viewport"
-    content="width=device-width, initial-scale=1"
+    content="width=device-width, initial-scale=1.0"
 >
 
-<title>
-{{ title }} · IPTV Manager
-</title>
+<title>{{ title }} - IPTV Manager</title>
 
 <style>
 
-:root{
-
-    --bg:#0b0f17;
-
-    --panel:#111827;
-
-    --panel2:#151e2d;
-
-    --border:#243044;
-
-    --text:#f8fafc;
-
-    --muted:#94a3b8;
-
-    --blue:#3b82f6;
-
-    --green:#22c55e;
-
-    --yellow:#facc15;
-
-    --red:#ef4444;
-
-    --shadow:
-        0 16px 40px rgba(0,0,0,.25);
+* {
+    box-sizing: border-box;
 }
 
-
-*{
-    box-sizing:border-box;
-}
-
-
-body{
-
-    margin:0;
-
-    background:
-        linear-gradient(
-            135deg,
-            #080c13,
-            #0f172a
-        );
-
-    color:var(--text);
-
+body {
+    margin: 0;
     font-family:
         Inter,
-        system-ui,
         -apple-system,
         BlinkMacSystemFont,
         "Segoe UI",
         sans-serif;
+
+    background: #f4f6f9;
+    color: #172033;
 }
 
-
-a{
-    text-decoration:none;
-    color:inherit;
+a {
+    text-decoration: none;
 }
 
+.sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
 
-.layout{
-
-    min-height:100vh;
-
-    display:flex;
-}
-
-
-.sidebar{
-
-    width:250px;
-
-    background:
-        rgba(10,15,24,.94);
-
-    border-right:
-        1px solid var(--border);
-
-    padding:24px 16px;
-
-    position:fixed;
-
-    inset:0 auto 0 0;
-
-    z-index:10;
-}
-
-
-.brand{
-
-    display:flex;
-
-    gap:12px;
-
-    align-items:center;
-
-    padding:
-        8px 10px 28px;
-}
-
-
-.brand-icon{
-
-    width:42px;
-
-    height:42px;
-
-    border-radius:12px;
+    width: 250px;
 
     background:
         linear-gradient(
-            135deg,
-            #2563eb,
-            #06b6d4
+            180deg,
+            #111827 0%,
+            #172033 100%
         );
 
-    display:grid;
+    color: white;
 
-    place-items:center;
+    padding: 25px 18px;
 
-    font-size:22px;
+    z-index: 10;
 }
 
-
-.brand strong{
-
-    display:block;
-
-    font-size:18px;
+.logo {
+    font-size: 24px;
+    font-weight: 800;
+    margin-bottom: 5px;
 }
 
-
-.brand span{
-
-    font-size:12px;
-
-    color:var(--muted);
+.logo-sub {
+    color: #94a3b8;
+    font-size: 12px;
+    margin-bottom: 35px;
 }
 
-
-.nav-title{
-
-    font-size:11px;
-
-    color:#64748b;
-
-    text-transform:uppercase;
-
-    letter-spacing:1px;
-
-    padding:
-        0 12px 8px;
+.menu-title {
+    color: #64748b;
+    font-size: 11px;
+    text-transform: uppercase;
+    font-weight: 700;
+    margin: 22px 10px 8px;
 }
 
-
-.nav a{
-
-    display:block;
-
-    padding:12px;
-
-    border-radius:10px;
-
-    color:#cbd5e1;
-
-    margin:4px 0;
+.menu a {
+    display: block;
+    color: #cbd5e1;
+    padding: 12px 14px;
+    margin: 4px 0;
+    border-radius: 10px;
+    font-size: 14px;
+    transition: .2s;
 }
 
-
-.nav a:hover,
-.nav a.active{
-
-    background:#172236;
-
-    color:#fff;
+.menu a:hover {
+    background: rgba(255,255,255,.08);
+    color: white;
 }
 
-
-.logout{
-
-    position:absolute;
-
-    left:16px;
-
-    right:16px;
-
-    bottom:20px;
+.menu a.active {
+    background: #2563eb;
+    color: white;
+    font-weight: 700;
 }
 
-
-.logout a{
-
-    display:block;
-
-    text-align:center;
-
-    padding:11px;
-
-    border:
-        1px solid var(--border);
-
-    border-radius:10px;
-
-    color:#cbd5e1;
+.main {
+    margin-left: 250px;
+    min-height: 100vh;
 }
 
+.topbar {
+    height: 72px;
+    background: white;
+    border-bottom: 1px solid #e5e7eb;
 
-.main{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
 
-    margin-left:250px;
+    padding: 0 30px;
 
-    width:
-        calc(100% - 250px);
-
-    padding:30px;
-
-    max-width:1500px;
+    position: sticky;
+    top: 0;
+    z-index: 5;
 }
 
-
-.top{
-
-    display:flex;
-
-    justify-content:space-between;
-
-    align-items:center;
-
-    gap:15px;
-
-    margin-bottom:28px;
+.topbar-title {
+    font-size: 20px;
+    font-weight: 750;
 }
 
-
-h1{
-
-    font-size:30px;
-
-    margin:
-        0 0 5px;
+.admin {
+    color: #64748b;
+    font-size: 13px;
 }
 
-
-.subtitle{
-
-    color:var(--muted);
+.content {
+    padding: 30px;
+    max-width: 1500px;
+    margin: auto;
 }
 
+.flash {
+    padding: 13px 16px;
+    border-radius: 10px;
+    margin-bottom: 20px;
+    background: #dbeafe;
+    color: #1e40af;
+    font-size: 14px;
+}
 
-.grid{
-
-    display:grid;
-
+.grid {
+    display: grid;
     grid-template-columns:
-        repeat(4,1fr);
-
-    gap:16px;
-
-    margin-bottom:18px;
+        repeat(4, minmax(0, 1fr));
+    gap: 18px;
 }
 
-
-.grid2{
-
-    display:grid;
-
-    grid-template-columns:
-        repeat(2,1fr);
-
-    gap:18px;
+.card {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 15px;
+    padding: 22px;
+    box-shadow:
+        0 4px 18px rgba(15,23,42,.04);
 }
 
-
-.card{
-
-    background:
-        rgba(17,24,39,.86);
-
-    border:
-        1px solid var(--border);
-
-    border-radius:16px;
-
-    padding:20px;
-
-    box-shadow:var(--shadow);
+.card-label {
+    color: #64748b;
+    font-size: 13px;
+    margin-bottom: 8px;
 }
 
-
-.metric-label{
-
-    color:var(--muted);
-
-    font-size:13px;
+.card-value {
+    font-size: 26px;
+    font-weight: 800;
 }
 
-
-.metric{
-
-    font-size:27px;
-
-    font-weight:800;
-
-    margin-top:8px;
+.blue {
+    color: #2563eb;
 }
 
-
-.green{
-    color:var(--green);
+.green {
+    color: #16a34a;
 }
 
-
-.yellow{
-    color:var(--yellow);
+.yellow {
+    color: #ca8a04;
 }
 
-
-.red{
-    color:var(--red);
+.red {
+    color: #dc2626;
 }
 
-
-.blue{
-    color:#60a5fa;
+.section {
+    margin-top: 22px;
 }
 
-
-.toolbar{
-
-    display:flex;
-
-    gap:10px;
-
-    flex-wrap:wrap;
-
-    margin-bottom:18px;
+.section-title {
+    font-size: 18px;
+    font-weight: 750;
+    margin-bottom: 15px;
 }
 
+.toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 18px;
+    flex-wrap: wrap;
+}
+
+.actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+
+    border: 0;
+    border-radius: 9px;
+
+    padding: 10px 15px;
+
+    cursor: pointer;
+
+    font-size: 13px;
+    font-weight: 700;
+
+    transition: .2s;
+}
+
+.btn:hover {
+    transform: translateY(-1px);
+}
+
+.btn-primary {
+    background: #2563eb;
+    color: white;
+}
+
+.btn-success {
+    background: #16a34a;
+    color: white;
+}
+
+.btn-warning {
+    background: #eab308;
+    color: #111827;
+}
+
+.btn-danger {
+    background: #dc2626;
+    color: white;
+}
+
+.btn-secondary {
+    background: #e2e8f0;
+    color: #334155;
+}
+
+.search {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+    max-width: 550px;
+}
+
+.search input {
+    flex: 1;
+}
 
 input,
-select{
+select {
+    width: 100%;
+    padding: 12px 13px;
 
-    width:100%;
+    border: 1px solid #dbe1e8;
+    border-radius: 9px;
 
-    background:#0b1220;
+    background: white;
+    color: #172033;
 
-    color:#fff;
+    font-size: 14px;
 
-    border:
-        1px solid var(--border);
-
-    border-radius:10px;
-
-    padding:12px;
-
-    font:inherit;
-
-    outline:none;
+    outline: none;
 }
-
 
 input:focus,
-select:focus{
-
-    border-color:#3b82f6;
+select:focus {
+    border-color: #2563eb;
+    box-shadow:
+        0 0 0 3px rgba(37,99,235,.10);
 }
 
-
-.form-grid{
-
-    display:grid;
-
+.form-grid {
+    display: grid;
     grid-template-columns:
-        repeat(2,1fr);
-
-    gap:16px;
+        repeat(2, minmax(0, 1fr));
+    gap: 17px;
 }
 
-
-label{
-
-    display:block;
-
-    color:#cbd5e1;
-
-    font-size:13px;
-
-    margin-bottom:7px;
+.form-group {
+    margin-bottom: 5px;
 }
 
-
-.btn{
-
-    border:0;
-
-    border-radius:10px;
-
-    padding:11px 15px;
-
-    font:inherit;
-
-    font-weight:700;
-
-    cursor:pointer;
-
-    display:inline-block;
+.form-group label {
+    display: block;
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 7px;
+    color: #475569;
 }
 
-
-.primary{
-
-    background:var(--blue);
-
-    color:white;
+.form-actions {
+    margin-top: 22px;
+    display: flex;
+    gap: 9px;
 }
 
-
-.secondary{
-
-    background:#1e293b;
-
-    color:white;
-
-    border:
-        1px solid var(--border);
+.table-container {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 15px;
+    overflow-x: auto;
+    box-shadow:
+        0 4px 18px rgba(15,23,42,.04);
 }
 
-
-.success{
-
-    background:#14532d;
-
-    color:#bbf7d0;
+table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 800px;
 }
 
-
-.danger{
-
-    background:#451a1a;
-
-    color:#fecaca;
+th {
+    background: #f8fafc;
+    color: #64748b;
+    font-size: 12px;
+    text-transform: uppercase;
+    text-align: left;
+    padding: 14px 16px;
+    border-bottom: 1px solid #e5e7eb;
 }
 
-
-.actions{
-
-    display:flex;
-
-    gap:7px;
-
-    flex-wrap:wrap;
+td {
+    padding: 14px 16px;
+    border-bottom: 1px solid #eef2f7;
+    font-size: 14px;
 }
 
-
-.client{
-
-    display:grid;
-
-    grid-template-columns:
-        2fr 1fr 1fr 1fr auto;
-
-    gap:15px;
-
-    align-items:center;
-
-    padding:16px;
-
-    border:
-        1px solid var(--border);
-
-    border-radius:14px;
-
-    background:#101827;
-
-    margin-bottom:10px;
+tr:last-child td {
+    border-bottom: 0;
 }
 
-
-.name{
-
-    font-size:17px;
-
-    font-weight:800;
+.customer-name {
+    font-weight: 750;
 }
 
-
-.username{
-
-    font-size:13px;
-
-    color:var(--muted);
-
-    margin-top:3px;
+.customer-user {
+    color: #64748b;
+    font-size: 12px;
+    margin-top: 3px;
 }
 
-
-.badge{
-
-    display:inline-block;
-
-    padding:6px 9px;
-
-    border-radius:999px;
-
-    font-size:12px;
-
-    font-weight:800;
+.status {
+    display: inline-flex;
+    padding: 5px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 800;
 }
 
+.status-paid {
+    background: #dcfce7;
+    color: #15803d;
+}
 
-.badge.paid{
+.status-pending {
+    background: #fef3c7;
+    color: #a16207;
+}
+
+.row-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.small-btn {
+    padding: 7px 9px;
+    font-size: 11px;
+}
+
+.progress-box {
+    margin-top: 15px;
+}
+
+.progress {
+    height: 12px;
+    width: 100%;
+    background: #e2e8f0;
+    border-radius: 20px;
+    overflow: hidden;
+}
+
+.progress-bar {
+    height: 100%;
+    background: #16a34a;
+    border-radius: 20px;
+}
+
+.chart {
+    display: grid;
+    gap: 15px;
+}
+
+.chart-item {
+    display: grid;
+    grid-template-columns: 100px 1fr 110px;
+    align-items: center;
+    gap: 12px;
+}
+
+.chart-label {
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.chart-track {
+    height: 20px;
+    background: #e2e8f0;
+    border-radius: 20px;
+    overflow: hidden;
+}
+
+.chart-fill {
+    height: 100%;
+    border-radius: 20px;
+}
+
+.chart-green {
+    background: #16a34a;
+}
+
+.chart-yellow {
+    background: #eab308;
+}
+
+.chart-value {
+    text-align: right;
+    font-weight: 750;
+    font-size: 13px;
+}
+
+.empty {
+    padding: 45px;
+    text-align: center;
+    color: #64748b;
+}
+
+.login-page {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 
     background:
-        rgba(34,197,94,.13);
-
-    color:#4ade80;
+        radial-gradient(
+            circle at top left,
+            #dbeafe,
+            transparent 40%
+        ),
+        #f4f6f9;
 }
 
+.login-card {
+    width: 100%;
+    max-width: 420px;
 
-.badge.pending{
+    background: white;
 
-    background:
-        rgba(250,204,21,.13);
+    border-radius: 18px;
 
-    color:#fde047;
-}
-
-
-.flash{
-
-    padding:12px 15px;
-
-    border-radius:10px;
-
-    background:#172554;
-
-    border:
-        1px solid #1d4ed8;
-
-    margin-bottom:18px;
-}
-
-
-table{
-
-    width:100%;
-
-    border-collapse:collapse;
-}
-
-
-th,
-td{
-
-    text-align:left;
-
-    padding:12px;
-
-    border-bottom:
-        1px solid var(--border);
-
-    font-size:14px;
-}
-
-
-th{
-
-    color:#94a3b8;
-
-    font-weight:600;
-}
-
-
-.empty{
-
-    text-align:center;
-
-    padding:40px;
-
-    color:var(--muted);
-}
-
-
-.mt{
-
-    margin-top:16px;
-}
-
-
-.full{
-
-    width:100%;
-}
-
-
-.bar{
-
-    height:12px;
-
-    background:#1e293b;
-
-    border-radius:99px;
-
-    overflow:hidden;
-
-    margin-top:12px;
-}
-
-
-.bar span{
-
-    display:block;
-
-    height:100%;
-
-    background:
-        linear-gradient(
-            90deg,
-            #22c55e,
-            #3b82f6
-        );
-}
-
-
-@media(max-width:1000px){
-
-    .grid{
-
-        grid-template-columns:
-            repeat(2,1fr);
-    }
-
-    .client{
-
-        grid-template-columns:
-            1fr 1fr;
-    }
-
-    .main{
-
-        padding:20px;
-    }
-}
-
-
-@media(max-width:700px){
-
-    .sidebar{
-
-        width:100%;
-
-        height:auto;
-
-        position:relative;
-
-        border-right:0;
-
-        border-bottom:
-            1px solid var(--border);
-    }
-
-    .layout{
-
-        display:block;
-    }
-
-    .main{
-
-        margin-left:0;
-
-        width:100%;
-
-        padding:16px;
-    }
-
-    .logout{
-
-        position:static;
-
-        margin-top:20px;
-    }
-
-    .grid,
-    .grid2,
-    .form-grid{
-
-        grid-template-columns:1fr;
-    }
-
-    .top{
-
-        align-items:flex-start;
-
-        flex-direction:column;
-    }
-
-    .client{
-
-        grid-template-columns:1fr;
-    }
-
-    .nav{
-
-        display:grid;
-
-        grid-template-columns:
-            1fr 1fr;
-    }
-
-    .brand{
-
-        padding-bottom:15px;
-    }
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="layout">
-
-<aside class="sidebar">
-
-<div class="brand">
-
-<div class="brand-icon">
-📺
-</div>
-
-<div>
-
-<strong>
-IPTV Manager
-</strong>
-
-<span>
-Administração
-</span>
-
-</div>
-
-</div>
-
-
-<div class="nav-title">
-Menu
-</div>
-
-
-<nav class="nav">
-
-<a
-class="{{ 'active' if active=='dashboard' else '' }}"
-href="{{ url_for('dashboard') }}"
->
-📊 Dashboard
-</a>
-
-
-<a
-class="{{ 'active' if active=='clientes' else '' }}"
-href="{{ url_for('clientes') }}"
->
-👥 Clientes
-</a>
-
-
-<a
-class="{{ 'active' if active=='novo' else '' }}"
-href="{{ url_for('novo_cliente') }}"
->
-➕ Adicionar
-</a>
-
-
-<a
-class="{{ 'active' if active=='importar' else '' }}"
-href="{{ url_for('importar') }}"
->
-📥 Importar
-</a>
-
-</nav>
-
-
-<div class="logout">
-
-<a href="{{ url_for('logout') }}">
-🚪 Sair
-</a>
-
-</div>
-
-</aside>
-
-
-<main class="main">
-
-{% with messages=get_flashed_messages() %}
-
-{% for message in messages %}
-
-<div class="flash">
-{{ message }}
-</div>
-
-{% endfor %}
-
-{% endwith %}
-
-
-{{ content|safe }}
-
-</main>
-
-</div>
-
-</body>
-
-</html>
-"""
-
-
-LOGIN = r"""
-<!doctype html>
-
-<html lang="pt-BR">
-
-<head>
-
-<meta charset="utf-8">
-
-<meta
-name="viewport"
-content="width=device-width,initial-scale=1"
->
-
-<title>
-Login · IPTV Manager
-</title>
-
-<style>
-
-*{
-    box-sizing:border-box;
-}
-
-
-body{
-
-    margin:0;
-
-    min-height:100vh;
-
-    display:grid;
-
-    place-items:center;
-
-    background:
-        linear-gradient(
-            135deg,
-            #080c13,
-            #0f172a
-        );
-
-    color:#fff;
-
-    font-family:
-        Inter,
-        system-ui,
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        sans-serif;
-}
-
-
-.login{
-
-    width:min(
-        410px,
-        92%
-    );
-
-    background:#111827;
-
-    border:
-        1px solid #243044;
-
-    border-radius:20px;
-
-    padding:32px;
+    padding: 35px;
 
     box-shadow:
-        0 20px 60px #0006;
+        0 20px 60px rgba(15,23,42,.12);
+
+    border: 1px solid #e5e7eb;
 }
 
-
-.icon{
-
-    width:58px;
-
-    height:58px;
-
-    margin:auto;
-
-    border-radius:16px;
-
-    display:grid;
-
-    place-items:center;
-
-    background:
-        linear-gradient(
-            135deg,
-            #2563eb,
-            #06b6d4
-        );
-
-    font-size:29px;
+.login-logo {
+    font-size: 28px;
+    font-weight: 850;
+    text-align: center;
 }
 
-
-h1{
-
-    text-align:center;
-
-    margin:
-        15px 0 5px;
+.login-sub {
+    text-align: center;
+    color: #64748b;
+    font-size: 13px;
+    margin: 7px 0 30px;
 }
 
-
-.sub{
-
-    text-align:center;
-
-    color:#94a3b8;
-
-    margin-bottom:25px;
+.login-card .form-group {
+    margin-bottom: 17px;
 }
 
-
-label{
-
-    display:block;
-
-    color:#cbd5e1;
-
-    font-size:13px;
-
-    margin:
-        13px 0 7px;
+.login-card .btn {
+    width: 100%;
+    padding: 13px;
 }
 
-
-input{
-
-    width:100%;
-
-    padding:12px;
-
-    border-radius:10px;
-
-    border:
-        1px solid #243044;
-
-    background:#0b1220;
-
-    color:#fff;
-
-    font-size:15px;
+.footer {
+    color: #94a3b8;
+    text-align: center;
+    font-size: 12px;
+    padding: 30px 0;
 }
 
+@media (max-width: 1000px) {
 
-button{
+    .grid {
+        grid-template-columns:
+            repeat(2, minmax(0, 1fr));
+    }
 
-    width:100%;
-
-    margin-top:18px;
-
-    padding:12px;
-
-    border:0;
-
-    border-radius:10px;
-
-    background:#3b82f6;
-
-    color:#fff;
-
-    font-weight:800;
-
-    font-size:15px;
-
-    cursor:pointer;
 }
 
+@media (max-width: 700px) {
 
-.error{
+    .sidebar {
+        position: relative;
+        width: 100%;
+        height: auto;
+        padding: 18px;
+    }
 
-    background:#451a1a;
+    .logo-sub {
+        margin-bottom: 15px;
+    }
 
-    color:#fecaca;
+    .menu-title {
+        display: none;
+    }
 
-    padding:10px;
+    .menu {
+        display: grid;
+        grid-template-columns:
+            repeat(2, 1fr);
+        gap: 5px;
+    }
 
-    border-radius:9px;
+    .menu a {
+        margin: 0;
+        text-align: center;
+        padding: 9px;
+    }
 
-    margin-bottom:12px;
+    .main {
+        margin-left: 0;
+    }
+
+    .topbar {
+        height: 60px;
+        padding: 0 17px;
+    }
+
+    .topbar-title {
+        font-size: 16px;
+    }
+
+    .content {
+        padding: 17px;
+    }
+
+    .grid {
+        grid-template-columns: 1fr;
+    }
+
+    .form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .chart-item {
+        grid-template-columns:
+            80px 1fr 90px;
+    }
+
 }
 
 </style>
@@ -1259,60 +860,107 @@ button{
 
 <body>
 
-<div class="login">
+<div class="sidebar">
 
-<div class="icon">
-📺
+    <div class="logo">
+        IPTV Manager
+    </div>
+
+    <div class="logo-sub">
+        Gestão de clientes
+    </div>
+
+    <div class="menu">
+
+        <div class="menu-title">
+            Principal
+        </div>
+
+        <a
+            href="{{ url_for('dashboard') }}"
+            class="{{ 'active' if active == 'dashboard' else '' }}"
+        >
+            Dashboard
+        </a>
+
+        <a
+            href="{{ url_for('clientes') }}"
+            class="{{ 'active' if active == 'clientes' else '' }}"
+        >
+            Clientes
+        </a>
+
+        <div class="menu-title">
+            Cadastro
+        </div>
+
+        <a
+            href="{{ url_for('novo_cliente') }}"
+            class="{{ 'active' if active == 'novo' else '' }}"
+        >
+            Novo cliente
+        </a>
+
+        <a
+            href="{{ url_for('importar') }}"
+            class="{{ 'active' if active == 'importar' else '' }}"
+        >
+            Importar clientes
+        </a>
+
+        <div class="menu-title">
+            Sistema
+        </div>
+
+        <a href="{{ url_for('logout') }}">
+            Sair
+        </a>
+
+    </div>
+
 </div>
 
-<h1>
-IPTV Manager
-</h1>
 
-<div class="sub">
-Painel administrativo
-</div>
+<div class="main">
 
+    <div class="topbar">
 
-{% if error %}
+        <div class="topbar-title">
+            {{ title }}
+        </div>
 
-<div class="error">
-{{ error }}
-</div>
+        <div class="admin">
+            Administrador
+        </div>
 
-{% endif %}
+    </div>
 
 
-<form method="post">
+    <main class="content">
 
-<label>
-Usuário
-</label>
+        {% with messages = get_flashed_messages() %}
 
-<input
-name="usuario"
-autocomplete="username"
-required
->
+            {% if messages %}
 
+                {% for message in messages %}
 
-<label>
-Senha
-</label>
+                    <div class="flash">
+                        {{ message }}
+                    </div>
 
-<input
-type="password"
-name="senha"
-autocomplete="current-password"
-required
->
+                {% endfor %}
 
+            {% endif %}
 
-<button>
-Entrar
-</button>
+        {% endwith %}
 
-</form>
+        {{ content | safe }}
+
+        <div class="footer">
+            IPTV Manager • Sistema de gestão
+        </div>
+
+    </main>
 
 </div>
 
@@ -1322,43 +970,108 @@ Entrar
 """
 
 
-def page(
-    content,
-    title,
-    active
-):
+def page(template, title, active, **context):
+
+    context["dinheiro"] = dinheiro
+    context["formatar_data"] = formatar_data
+
+    rendered = render_template_string(
+        template,
+        **context,
+    )
 
     return render_template_string(
-        BASE,
-        content=render_template_string(
-            content
-        ),
+        BASE_HTML,
+        content=rendered,
         title=title,
-        active=active
+        active=active,
     )
 
 
-@app.route(
-    "/login",
-    methods=["GET", "POST"]
-)
+# ============================================================
+# LOGIN
+# ============================================================
+
+LOGIN_HTML = """
+<div class="login-page">
+
+    <div class="login-card">
+
+        <div class="login-logo">
+            IPTV Manager
+        </div>
+
+        <div class="login-sub">
+            Acesso administrativo
+        </div>
+
+        <form method="POST">
+
+            <div class="form-group">
+
+                <label>
+                    Usuário
+                </label>
+
+                <input
+                    type="text"
+                    name="username"
+                    required
+                    autocomplete="username"
+                    placeholder="Digite seu usuário"
+                >
+
+            </div>
+
+            <div class="form-group">
+
+                <label>
+                    Senha
+                </label>
+
+                <input
+                    type="password"
+                    name="password"
+                    required
+                    autocomplete="current-password"
+                    placeholder="Digite sua senha"
+                >
+
+            </div>
+
+            <button
+                class="btn btn-primary"
+                type="submit"
+            >
+                Entrar no sistema
+            </button>
+
+        </form>
+
+    </div>
+
+</div>
+"""
+
+
+@app.route("/login", methods=["GET", "POST"])
 def login():
 
     if request.method == "POST":
 
-        usuario = request.form.get(
-            "usuario",
-            ""
+        username = request.form.get(
+            "username",
+            "",
         ).strip()
 
-        senha = request.form.get(
-            "senha",
-            ""
+        password = request.form.get(
+            "password",
+            "",
         )
 
         if (
-            usuario == ADMIN_USER
-            and senha == ADMIN_PASSWORD
+            username == ADMIN_USER
+            and password == ADMIN_PASSWORD
         ):
 
             session["logged_in"] = True
@@ -1367,14 +1080,10 @@ def login():
                 url_for("dashboard")
             )
 
-        return render_template_string(
-            LOGIN,
-            error="Usuário ou senha incorretos."
-        )
+        flash("Usuário ou senha incorretos.")
 
     return render_template_string(
-        LOGIN,
-        error=None
+        LOGIN_HTML
     )
 
 
@@ -1388,22 +1097,11 @@ def logout():
     )
 
 
+# ============================================================
+# DASHBOARD
+# ============================================================
+
 @app.route("/")
-def index():
-
-    if session.get(
-        "logged_in"
-    ):
-
-        return redirect(
-            url_for("dashboard")
-        )
-
-    return redirect(
-        url_for("login")
-    )
-
-
 @app.route("/dashboard")
 @login_required
 def dashboard():
@@ -1412,264 +1110,264 @@ def dashboard():
 
     try:
 
-        resumo = obter_resumo(db)
+        total = db.query(
+            func.count(Cliente.id)
+        ).scalar() or 0
+
+        pagos = db.query(
+            func.count(Cliente.id)
+        ).filter(
+            Cliente.status == "Pago"
+        ).scalar() or 0
+
+        pendentes = db.query(
+            func.count(Cliente.id)
+        ).filter(
+            Cliente.status == "Pendente"
+        ).scalar() or 0
+
+        recebido = db.query(
+            func.coalesce(
+                func.sum(Cliente.valor),
+                0,
+            )
+        ).filter(
+            Cliente.status == "Pago"
+        ).scalar() or 0
+
+        previsto = db.query(
+            func.coalesce(
+                func.sum(Cliente.valor),
+                0,
+            )
+        ).scalar() or 0
+
+        pendente_valor = db.query(
+            func.coalesce(
+                func.sum(Cliente.valor),
+                0,
+            )
+        ).filter(
+            Cliente.status == "Pendente"
+        ).scalar() or 0
+
+        if total:
+            percentual = (
+                pagos / total
+            ) * 100
+        else:
+            percentual = 0
+
+        resumo = {
+            "total": total,
+            "pagos": pagos,
+            "pendentes": pendentes,
+            "recebido": recebido,
+            "previsto": previsto,
+            "pendente_valor": pendente_valor,
+            "percentual": percentual,
+        }
+
+        content = """
+        <div class="grid">
 
-        content = r"""
+            <div class="card">
+                <div class="card-label">
+                    Total de clientes
+                </div>
 
-<div class="top">
+                <div class="card-value blue">
+                    {{ resumo.total }}
+                </div>
+            </div>
 
-<div>
+            <div class="card">
+                <div class="card-label">
+                    Pagamentos recebidos
+                </div>
 
-<h1>
-Dashboard
-</h1>
+                <div class="card-value green">
+                    {{ resumo.pagos }}
+                </div>
+            </div>
 
-<div class="subtitle">
-Visão geral da sua operação
-</div>
+            <div class="card">
+                <div class="card-label">
+                    Pendentes
+                </div>
 
-</div>
+                <div class="card-value yellow">
+                    {{ resumo.pendentes }}
+                </div>
+            </div>
 
-</div>
+            <div class="card">
+                <div class="card-label">
+                    Valor recebido
+                </div>
 
+                <div class="card-value green">
+                    {{ dinheiro(resumo.recebido) }}
+                </div>
+            </div>
 
-<div class="grid">
+        </div>
 
 
-<div class="card">
+        <div class="section">
 
-<div class="metric-label">
-👥 Total de clientes
-</div>
+            <div class="card">
 
-<div class="metric">
-{{ resumo.total }}
-</div>
+                <div class="section-title">
+                    Resumo financeiro
+                </div>
 
-</div>
+                <div class="chart">
 
+                    <div class="chart-item">
 
-<div class="card">
+                        <div class="chart-label">
+                            Recebido
+                        </div>
 
-<div class="metric-label">
-🟢 Clientes pagos
-</div>
+                        <div class="chart-track">
 
-<div class="metric green">
-{{ resumo.pagos }}
-</div>
+                            {% if resumo.previsto > 0 %}
 
-</div>
+                                {% set recebido_pct =
+                                    (resumo.recebido / resumo.previsto * 100)
+                                %}
 
+                            {% else %}
 
-<div class="card">
+                                {% set recebido_pct = 0 %}
 
-<div class="metric-label">
-🟡 Pendentes
-</div>
+                            {% endif %}
 
-<div class="metric yellow">
-{{ resumo.pendentes }}
-</div>
+                            <div
+                                class="chart-fill chart-green"
+                                style="width: {{ recebido_pct }}%;"
+                            ></div>
 
-</div>
+                        </div>
 
+                        <div class="chart-value">
+                            {{ dinheiro(resumo.recebido) }}
+                        </div>
 
-<div class="card">
+                    </div>
 
-<div class="metric-label">
-💰 Total recebido
-</div>
 
-<div class="metric blue">
-{{ dinheiro(resumo.recebido) }}
-</div>
+                    <div class="chart-item">
 
-</div>
+                        <div class="chart-label">
+                            Pendente
+                        </div>
 
+                        <div class="chart-track">
 
-</div>
+                            {% if resumo.previsto > 0 %}
 
+                                {% set pendente_pct =
+                                    (resumo.pendente_valor / resumo.previsto * 100)
+                                %}
 
-<div class="grid2">
+                            {% else %}
 
+                                {% set pendente_pct = 0 %}
 
-<div class="card">
+                            {% endif %}
 
-<div class="metric-label">
-💵 Valor pendente
-</div>
+                            <div
+                                class="chart-fill chart-yellow"
+                                style="width: {{ pendente_pct }}%;"
+                            ></div>
 
-<div class="metric">
-{{ dinheiro(resumo.pendente_valor) }}
-</div>
+                        </div>
 
-</div>
+                        <div class="chart-value">
+                            {{ dinheiro(resumo.pendente_valor) }}
+                        </div>
 
+                    </div>
 
-<div class="card">
+                </div>
 
-<div class="metric-label">
-📈 Faturamento previsto
-</div>
+            </div>
 
-<div class="metric">
-{{ dinheiro(resumo.previsto) }}
-</div>
+        </div>
 
-</div>
 
+        <div class="section">
 
-</div>
+            <div class="grid">
 
+                <div class="card">
 
-<div
-class="grid2"
-style="margin-top:18px"
->
+                    <div class="card-label">
+                        Receita prevista
+                    </div>
 
+                    <div class="card-value blue">
+                        {{ dinheiro(resumo.previsto) }}
+                    </div>
 
-<div class="card">
+                </div>
 
-<h3>
-Distribuição de clientes
-</h3>
+                <div class="card">
 
+                    <div class="card-label">
+                        Valor pendente
+                    </div>
 
-{% set percentual =
-(
-resumo.pagos
-/
-resumo.total
-*
-100
-)
-if resumo.total
-else 0
-%}
+                    <div class="card-value yellow">
+                        {{ dinheiro(resumo.pendente_valor) }}
+                    </div>
 
+                </div>
 
-<div
-style="
-font-size:30px;
-font-weight:800
-"
->
+                <div class="card">
 
-{{ "%.0f"|format(percentual) }}%
+                    <div class="card-label">
+                        Percentual pago
+                    </div>
 
-</div>
+                    <div class="card-value green">
+                        {{ "%.1f"|format(resumo.percentual) }}%
+                    </div>
 
+                </div>
 
-<div class="subtitle">
-dos clientes estão pagos
-</div>
+                <div class="card">
 
+                    <div class="card-label">
+                        Percentual pendente
+                    </div>
 
-<div class="bar">
+                    <div class="card-value red">
+                        {{ "%.1f"|format(100 - resumo.percentual) }}%
+                    </div>
 
-<span
-style="width:{{ percentual }}%"
->
-</span>
+                </div>
 
-</div>
+            </div>
 
-
-<div
-style="
-display:flex;
-justify-content:space-between;
-margin-top:15px;
-color:#94a3b8;
-font-size:13px
-"
->
-
-<span>
-Pagos: {{ resumo.pagos }}
-</span>
-
-<span>
-Pendentes: {{ resumo.pendentes }}
-</span>
-
-</div>
-
-</div>
-
-
-<div class="card">
-
-<h3>
-Resumo financeiro
-</h3>
-
-
-<table>
-
-<tr>
-
-<td>
-Recebido
-</td>
-
-<td class="green">
-
-<strong>
-{{ dinheiro(resumo.recebido) }}
-</strong>
-
-</td>
-
-</tr>
-
-
-<tr>
-
-<td>
-Pendente
-</td>
-
-<td class="yellow">
-
-<strong>
-{{ dinheiro(resumo.pendente_valor) }}
-</strong>
-
-</td>
-
-</tr>
-
-
-<tr>
-
-<td>
-Total previsto
-</td>
-
-<td class="blue">
-
-<strong>
-{{ dinheiro(resumo.previsto) }}
-</strong>
-
-</td>
-
-</tr>
-
-</table>
-
-</div>
-
-</div>
-
-"""
+        </div>
+        """
 
         return page(
             content,
             "Dashboard",
-            "dashboard"
+            "dashboard",
+            resumo=resumo,
+        )
+
+    except SQLAlchemyError as error:
+
+        return (
+            "Erro ao acessar o banco de dados: "
+            + str(error),
+            500,
         )
 
     finally:
@@ -1677,369 +1375,324 @@ Total previsto
         db.close()
 
 
+# ============================================================
+# CLIENTES
+# ============================================================
+
 @app.route("/clientes")
 @login_required
 def clientes():
+
+    busca = request.args.get(
+        "busca",
+        "",
+    ).strip()
+
+    status = request.args.get(
+        "status",
+        "",
+    ).strip()
 
     db = SessionLocal()
 
     try:
 
-        busca = request.args.get(
-            "busca",
-            ""
-        ).strip()
-
-        status = request.args.get(
-            "status",
-            "Todos"
-        )
-
-
         query = db.query(
             Cliente
         )
-
 
         if busca:
 
             termo = f"%{busca}%"
 
             query = query.filter(
-
-                (
-                    Cliente.nome.ilike(
-                        termo
-                    )
-                )
-
+                (Cliente.nome.ilike(termo))
                 |
-
-                (
-                    Cliente.usuario.ilike(
-                        termo
-                    )
-                )
-
+                (Cliente.usuario.ilike(termo))
             )
 
-
-        if status in (
-            "Pago",
-            "Pendente"
-        ):
+        if status in ["Pago", "Pendente"]:
 
             query = query.filter(
                 Cliente.status == status
             )
 
+        lista = query.order_by(
+            Cliente.nome.asc()
+        ).all()
 
-        lista = (
-            query
-            .order_by(
-                Cliente.nome.asc()
-            )
-            .all()
-        )
+        content = """
+        <div class="toolbar">
 
+            <form
+                method="GET"
+                class="search"
+            >
 
-        content = r"""
+                <input
+                    type="text"
+                    name="busca"
+                    value="{{ busca }}"
+                    placeholder="Buscar por nome ou usuário..."
+                >
 
-<div class="top">
+                <select name="status">
 
-<div>
+                    <option value="">
+                        Todos
+                    </option>
 
-<h1>
-Clientes
-</h1>
+                    <option
+                        value="Pago"
+                        {% if status == "Pago" %}
+                            selected
+                        {% endif %}
+                    >
+                        Pagos
+                    </option>
 
-<div class="subtitle">
-Gerencie clientes, pagamentos e usuários.
-</div>
+                    <option
+                        value="Pendente"
+                        {% if status == "Pendente" %}
+                            selected
+                        {% endif %}
+                    >
+                        Pendentes
+                    </option>
 
-</div>
+                </select>
 
+                <button
+                    type="submit"
+                    class="btn btn-primary"
+                >
+                    Buscar
+                </button>
 
-<a
-class="btn primary"
-href="{{ url_for('novo_cliente') }}"
->
-＋ Novo cliente
-</a>
+            </form>
 
-</div>
 
+            <div class="actions">
 
-<div
-class="card"
-style="margin-bottom:18px"
->
+                <a
+                    href="{{ url_for('novo_cliente') }}"
+                    class="btn btn-success"
+                >
+                    + Novo cliente
+                </a>
 
-<form
-method="get"
-class="toolbar"
->
+                <a
+                    href="{{ url_for('importar') }}"
+                    class="btn btn-secondary"
+                >
+                    Importar CSV
+                </a>
 
+            </div>
 
-<div
-style="
-flex:2;
-min-width:220px
-"
->
+        </div>
 
-<label>
-Pesquisar
-</label>
 
-<input
-name="busca"
-value="{{ busca }}"
-placeholder="Nome ou usuário"
->
+        <div class="table-container">
 
-</div>
+            {% if lista %}
 
+            <table>
 
-<div
-style="
-flex:1;
-min-width:160px
-"
->
+                <thead>
 
-<label>
-Status
-</label>
+                    <tr>
 
-<select
-name="status"
->
+                        <th>
+                            Cliente
+                        </th>
 
-<option
-{{ 'selected' if status=='Todos' }}
->
-Todos
-</option>
+                        <th>
+                            Usuário
+                        </th>
 
-<option
-{{ 'selected' if status=='Pago' }}
->
-Pago
-</option>
+                        <th>
+                            Valor
+                        </th>
 
-<option
-{{ 'selected' if status=='Pendente' }}
->
-Pendente
-</option>
+                        <th>
+                            Vencimento
+                        </th>
 
-</select>
+                        <th>
+                            Status
+                        </th>
 
-</div>
+                        <th>
+                            Pagamento
+                        </th>
 
+                        <th>
+                            Ações
+                        </th>
 
-<div
-style="align-self:end"
->
+                    </tr>
 
-<button
-class="btn primary"
->
-Filtrar
-</button>
+                </thead>
 
-</div>
+                <tbody>
 
+                    {% for c in lista %}
 
-</form>
+                    <tr>
 
-</div>
+                        <td>
 
+                            <div class="customer-name">
+                                {{ c.nome }}
+                            </div>
 
-<div
-class="subtitle"
-style="margin-bottom:12px"
->
+                        </td>
 
-{{ lista|length }}
-cliente(s) encontrado(s)
+                        <td>
 
-</div>
+                            <div class="customer-user">
+                                {{ c.usuario }}
+                            </div>
 
+                        </td>
 
-{% if lista %}
+                        <td>
+                            {{ dinheiro(c.valor) }}
+                        </td>
 
+                        <td>
+                            {{ formatar_data(c.vencimento) }}
+                        </td>
 
-{% for c in lista %}
+                        <td>
 
+                            {% if c.status == "Pago" %}
 
-<div class="client">
+                                <span class="status status-paid">
+                                    PAGO
+                                </span>
 
+                            {% else %}
 
-<div>
+                                <span class="status status-pending">
+                                    PENDENTE
+                                </span>
 
-<div
-class="name
-{{ 'green'
-if c.status=='Pago'
-else 'yellow'
-}}"
->
+                            {% endif %}
 
-{{ c.nome }}
+                        </td>
 
-</div>
+                        <td>
+                            {{ formatar_data(c.data_pagamento) }}
+                        </td>
 
-<div class="username">
+                        <td>
 
-{{ c.usuario }}
+                            <div class="row-actions">
 
-</div>
+                                <a
+                                    href="{{ url_for(
+                                        'editar_cliente',
+                                        cliente_id=c.id
+                                    ) }}"
+                                    class="btn btn-primary small-btn"
+                                >
+                                    Editar
+                                </a>
 
-</div>
 
+                                <form
+                                    method="POST"
+                                    action="{{ url_for(
+                                        'alterar_status',
+                                        cliente_id=c.id
+                                    ) }}"
+                                >
 
-<div>
+                                    {% if c.status == "Pago" %}
 
-<div class="metric-label">
-Mensalidade
-</div>
+                                        <button
+                                            class="btn btn-warning small-btn"
+                                            type="submit"
+                                        >
+                                            Pendente
+                                        </button>
 
-<strong>
-{{ dinheiro(c.valor) }}
-</strong>
+                                    {% else %}
 
-</div>
+                                        <button
+                                            class="btn btn-success small-btn"
+                                            type="submit"
+                                        >
+                                            Marcar pago
+                                        </button>
 
+                                    {% endif %}
 
-<div>
+                                </form>
 
-<div class="metric-label">
-Vencimento
-</div>
 
-<strong>
+                                <form
+                                    method="POST"
+                                    action="{{ url_for(
+                                        'excluir_cliente',
+                                        cliente_id=c.id
+                                    ) }}"
+                                    onsubmit="return confirm(
+                                        'Deseja realmente excluir este cliente?'
+                                    );"
+                                >
 
-{{ c.vencimento.strftime('%d/%m/%Y')
-if c.vencimento
-else '-' }}
+                                    <button
+                                        class="btn btn-danger small-btn"
+                                        type="submit"
+                                    >
+                                        Excluir
+                                    </button>
 
-</strong>
+                                </form>
 
-</div>
+                            </div>
 
+                        </td>
 
-<div>
+                    </tr>
 
-<span
-class="badge
-{{ 'paid'
-if c.status=='Pago'
-else 'pending'
-}}"
->
+                    {% endfor %}
 
-{{ '✓ Pago'
-if c.status=='Pago'
-else '⏳ Pendente' }}
+                </tbody>
 
-</span>
+            </table>
 
-</div>
+            {% else %}
 
+                <div class="empty">
 
-<div class="actions">
+                    Nenhum cliente encontrado.
 
+                </div>
 
-<form
-method="post"
-action="{{ url_for(
-'alternar_status',
-cliente_id=c.id
-) }}"
->
+            {% endif %}
 
-<button
-class="btn
-{{ 'secondary'
-if c.status=='Pago'
-else 'success'
-}}"
->
-
-{{ 'Marcar pendente'
-if c.status=='Pago'
-else 'Marcar pago'
-}}
-
-</button>
-
-</form>
-
-
-<a
-class="btn secondary"
-href="{{ url_for(
-'editar_cliente',
-cliente_id=c.id
-) }}"
->
-
-Editar
-
-</a>
-
-
-<form
-method="post"
-action="{{ url_for(
-'excluir_cliente',
-cliente_id=c.id
-) }}"
-onsubmit="
-return confirm(
-'Excluir este cliente definitivamente?'
-)
-"
->
-
-<button
-class="btn danger"
->
-Excluir
-</button>
-
-</form>
-
-
-</div>
-
-
-</div>
-
-
-{% endfor %}
-
-
-{% else %}
-
-
-<div class="card empty">
-
-Nenhum cliente encontrado.
-
-</div>
-
-
-{% endif %}
-
-"""
+        </div>
+        """
 
         return page(
             content,
             "Clientes",
-            "clientes"
+            "clientes",
+            lista=lista,
+            busca=busca,
+            status=status,
+        )
+
+    except SQLAlchemyError as error:
+
+        return (
+            "Erro ao acessar o banco de dados: "
+            + str(error),
+            500,
         )
 
     finally:
@@ -2047,218 +1700,62 @@ Nenhum cliente encontrado.
         db.close()
 
 
-FORM = r"""
-
-<div class="top">
-
-<div>
-
-<h1>
-
-{{ 'Editar cliente'
-if editar
-else 'Adicionar cliente' }}
-
-</h1>
-
-
-<div class="subtitle">
-
-{{ 'Atualize os dados do cliente.'
-if editar
-else 'Cadastre um novo cliente.' }}
-
-</div>
-
-</div>
-
-</div>
-
-
-<div class="card">
-
-<form method="post">
-
-
-<div class="form-grid">
-
-
-<div>
-
-<label>
-Nome do cliente
-</label>
-
-<input
-name="nome"
-value="{{ c.nome if c else '' }}"
-required
-maxlength="150"
-placeholder="Ex: João Silva"
->
-
-</div>
-
-
-<div>
-
-<label>
-Nome de usuário
-</label>
-
-<input
-name="usuario"
-value="{{ c.usuario if c else '' }}"
-required
-maxlength="150"
-placeholder="Ex: joao123"
->
-
-</div>
-
-
-<div>
-
-<label>
-Valor da mensalidade
-</label>
-
-<input
-type="number"
-step="0.01"
-min="0"
-name="valor"
-value="{{ c.valor if c else '25.00' }}"
-required
->
-
-</div>
-
-
-<div>
-
-<label>
-Data de vencimento
-</label>
-
-<input
-type="date"
-name="vencimento"
-value="{{
-c.vencimento.isoformat()
-if c and c.vencimento
-else ''
-}}"
->
-
-</div>
-
-
-</div>
-
-
-<div class="actions mt">
-
-
-<button
-class="btn primary"
->
-
-{{ 'Salvar alterações'
-if editar
-else 'Cadastrar cliente' }}
-
-</button>
-
-
-<a
-class="btn secondary"
-href="{{ url_for('clientes') }}"
->
-
-Cancelar
-
-</a>
-
-
-</div>
-
-
-</form>
-
-</div>
-
-"""
-
+# ============================================================
+# NOVO CLIENTE
+# ============================================================
 
 @app.route(
     "/clientes/novo",
-    methods=["GET", "POST"]
+    methods=["GET", "POST"],
 )
 @login_required
 def novo_cliente():
 
     if request.method == "POST":
 
+        nome = request.form.get(
+            "nome",
+            "",
+        ).strip()
+
+        usuario = request.form.get(
+            "usuario",
+            "",
+        ).strip()
+
+        valor = parse_valor(
+            request.form.get(
+                "valor",
+                "0",
+            )
+        )
+
+        vencimento = parse_data(
+            request.form.get(
+                "vencimento",
+                "",
+            )
+        )
+
+        if not nome or not usuario:
+
+            flash(
+                "Nome e usuário são obrigatórios."
+            )
+
+            return redirect(
+                url_for("novo_cliente")
+            )
+
         db = SessionLocal()
 
         try:
 
-            nome = request.form.get(
-                "nome",
-                ""
-            ).strip()
-
-            usuario = request.form.get(
-                "usuario",
-                ""
-            ).strip()
-
-            valor = float(
-                request.form.get(
-                    "valor",
-                    "0"
-                )
-                or 0
-            )
-
-            vencimento_texto = request.form.get(
-                "vencimento",
-                ""
-            ).strip()
-
-
-            vencimento = (
-                date.fromisoformat(
-                    vencimento_texto
-                )
-                if vencimento_texto
-                else None
-            )
-
-
-            if not nome or not usuario:
-
-                flash(
-                    "Nome e usuário são obrigatórios."
-                )
-
-                return redirect(
-                    url_for(
-                        "novo_cliente"
-                    )
-                )
-
-
-            existente = (
-                db.query(Cliente)
-                .filter(
-                    Cliente.usuario
-                    == usuario
-                )
-                .first()
-            )
-
+            existente = db.query(
+                Cliente
+            ).filter(
+                Cliente.usuario == usuario
+            ).first()
 
             if existente:
 
@@ -2267,93 +1764,165 @@ def novo_cliente():
                 )
 
                 return redirect(
-                    url_for(
-                        "novo_cliente"
-                    )
+                    url_for("novo_cliente")
                 )
 
-
-            db.add(
-                Cliente(
-                    nome=nome,
-                    usuario=usuario,
-                    valor=valor,
-                    vencimento=vencimento,
-                    status="Pendente"
-                )
+            cliente = Cliente(
+                nome=nome,
+                usuario=usuario,
+                valor=valor,
+                vencimento=vencimento,
+                status="Pendente",
             )
 
+            db.add(cliente)
 
             db.commit()
-
 
             flash(
                 "Cliente cadastrado com sucesso."
             )
 
-
             return redirect(
                 url_for("clientes")
             )
 
-
-        except (
-            ValueError,
-            SQLAlchemyError
-        ):
+        except SQLAlchemyError as error:
 
             db.rollback()
 
             flash(
-                "Não foi possível cadastrar o cliente."
+                "Erro ao cadastrar cliente: "
+                + str(error)
             )
-
-            return redirect(
-                url_for(
-                    "novo_cliente"
-                )
-            )
-
 
         finally:
 
             db.close()
 
+    content = """
+    <div class="card">
 
-    return render_template_string(
-        BASE,
-        content=render_template_string(
-            FORM,
-            c=None,
-            editar=False
-        ),
-        title="Adicionar cliente",
-        active="novo"
+        <div class="section-title">
+            Cadastrar novo cliente
+        </div>
+
+        <form method="POST">
+
+            <div class="form-grid">
+
+                <div class="form-group">
+
+                    <label>
+                        Nome do cliente
+                    </label>
+
+                    <input
+                        type="text"
+                        name="nome"
+                        required
+                        placeholder="Ex.: João Silva"
+                    >
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>
+                        Nome de usuário
+                    </label>
+
+                    <input
+                        type="text"
+                        name="usuario"
+                        required
+                        placeholder="Ex.: joao123"
+                    >
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>
+                        Valor mensal
+                    </label>
+
+                    <input
+                        type="text"
+                        name="valor"
+                        placeholder="Ex.: 25,00"
+                    >
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>
+                        Vencimento
+                    </label>
+
+                    <input
+                        type="date"
+                        name="vencimento"
+                    >
+
+                </div>
+
+            </div>
+
+
+            <div class="form-actions">
+
+                <button
+                    type="submit"
+                    class="btn btn-success"
+                >
+                    Salvar cliente
+                </button>
+
+                <a
+                    href="{{ url_for('clientes') }}"
+                    class="btn btn-secondary"
+                >
+                    Cancelar
+                </a>
+
+            </div>
+
+        </form>
+
+    </div>
+    """
+
+    return page(
+        content,
+        "Novo cliente",
+        "novo",
     )
 
 
+# ============================================================
+# EDITAR CLIENTE
+# ============================================================
+
 @app.route(
     "/clientes/<int:cliente_id>/editar",
-    methods=["GET", "POST"]
+    methods=["GET", "POST"],
 )
 @login_required
-def editar_cliente(
-    cliente_id
-):
+def editar_cliente(cliente_id):
 
     db = SessionLocal()
 
     try:
 
-        cliente = (
-            db.query(Cliente)
-            .filter(
-                Cliente.id
-                == cliente_id
-            )
-            .first()
+        cliente = obter_cliente(
+            db,
+            cliente_id,
         )
-
 
         if not cliente:
 
@@ -2365,41 +1934,31 @@ def editar_cliente(
                 url_for("clientes")
             )
 
-
         if request.method == "POST":
 
             nome = request.form.get(
                 "nome",
-                ""
+                "",
             ).strip()
 
             usuario = request.form.get(
                 "usuario",
-                ""
+                "",
             ).strip()
 
-            valor = float(
+            valor = parse_valor(
                 request.form.get(
                     "valor",
-                    "0"
+                    "0",
                 )
-                or 0
             )
 
-            vencimento_texto = request.form.get(
-                "vencimento",
-                ""
-            ).strip()
-
-
-            vencimento = (
-                date.fromisoformat(
-                    vencimento_texto
+            vencimento = parse_data(
+                request.form.get(
+                    "vencimento",
+                    "",
                 )
-                if vencimento_texto
-                else None
             )
-
 
             if not nome or not usuario:
 
@@ -2410,22 +1969,16 @@ def editar_cliente(
                 return redirect(
                     url_for(
                         "editar_cliente",
-                        cliente_id=cliente_id
+                        cliente_id=cliente_id,
                     )
                 )
 
-
-            outro = (
-                db.query(Cliente)
-                .filter(
-                    Cliente.usuario
-                    == usuario,
-                    Cliente.id
-                    != cliente_id
-                )
-                .first()
-            )
-
+            outro = db.query(
+                Cliente
+            ).filter(
+                Cliente.usuario == usuario,
+                Cliente.id != cliente_id,
+            ).first()
 
             if outro:
 
@@ -2436,87 +1989,168 @@ def editar_cliente(
                 return redirect(
                     url_for(
                         "editar_cliente",
-                        cliente_id=cliente_id
+                        cliente_id=cliente_id,
                     )
                 )
 
-
             cliente.nome = nome
-
             cliente.usuario = usuario
-
             cliente.valor = valor
-
             cliente.vencimento = vencimento
 
-
             db.commit()
-
 
             flash(
                 "Cliente atualizado com sucesso."
             )
 
-
             return redirect(
                 url_for("clientes")
             )
 
+        content = """
+        <div class="card">
 
-        return render_template_string(
-            BASE,
-            content=render_template_string(
-                FORM,
-                c=cliente,
-                editar=True
-            ),
-            title="Editar cliente",
-            active="clientes"
+            <div class="section-title">
+                Editar cliente
+            </div>
+
+            <form method="POST">
+
+                <div class="form-grid">
+
+                    <div class="form-group">
+
+                        <label>
+                            Nome do cliente
+                        </label>
+
+                        <input
+                            type="text"
+                            name="nome"
+                            value="{{ cliente.nome }}"
+                            required
+                        >
+
+                    </div>
+
+
+                    <div class="form-group">
+
+                        <label>
+                            Nome de usuário
+                        </label>
+
+                        <input
+                            type="text"
+                            name="usuario"
+                            value="{{ cliente.usuario }}"
+                            required
+                        >
+
+                    </div>
+
+
+                    <div class="form-group">
+
+                        <label>
+                            Valor mensal
+                        </label>
+
+                        <input
+                            type="text"
+                            name="valor"
+                            value="{{ cliente.valor }}"
+                        >
+
+                    </div>
+
+
+                    <div class="form-group">
+
+                        <label>
+                            Vencimento
+                        </label>
+
+                        <input
+                            type="date"
+                            name="vencimento"
+                            value="{{
+                                cliente.vencimento.strftime('%Y-%m-%d')
+                                if cliente.vencimento
+                                else ''
+                            }}"
+                        >
+
+                    </div>
+
+                </div>
+
+
+                <div class="form-actions">
+
+                    <button
+                        type="submit"
+                        class="btn btn-primary"
+                    >
+                        Salvar alterações
+                    </button>
+
+                    <a
+                        href="{{ url_for('clientes') }}"
+                        class="btn btn-secondary"
+                    >
+                        Cancelar
+                    </a>
+
+                </div>
+
+            </form>
+
+        </div>
+        """
+
+        return page(
+            content,
+            "Editar cliente",
+            "clientes",
+            cliente=cliente,
         )
 
-
-    except (
-        ValueError,
-        SQLAlchemyError
-    ):
+    except SQLAlchemyError as error:
 
         db.rollback()
 
-        flash(
-            "Não foi possível atualizar o cliente."
+        return (
+            "Erro ao editar cliente: "
+            + str(error),
+            500,
         )
-
-        return redirect(
-            url_for("clientes")
-        )
-
 
     finally:
 
         db.close()
 
 
-@app.post(
-    "/clientes/<int:cliente_id>/status"
+# ============================================================
+# ALTERAR STATUS
+# ============================================================
+
+@app.route(
+    "/clientes/<int:cliente_id>/status",
+    methods=["POST"],
 )
 @login_required
-def alternar_status(
-    cliente_id
-):
+def alterar_status(cliente_id):
 
     db = SessionLocal()
 
     try:
 
-        cliente = (
-            db.query(Cliente)
-            .filter(
-                Cliente.id
-                == cliente_id
-            )
-            .first()
+        cliente = obter_cliente(
+            db,
+            cliente_id,
         )
-
 
         if not cliente:
 
@@ -2528,73 +2162,63 @@ def alternar_status(
                 url_for("clientes")
             )
 
-
         if cliente.status == "Pago":
 
             cliente.status = "Pendente"
-
             cliente.data_pagamento = None
+
+            flash(
+                "Cliente alterado para pendente."
+            )
 
         else:
 
             cliente.status = "Pago"
-
             cliente.data_pagamento = datetime.utcnow()
 
+            flash(
+                "Pagamento registrado com sucesso."
+            )
 
         db.commit()
 
-
-        flash(
-            "Status atualizado."
-        )
-
-
-        return redirect(
-            request.referrer
-            or url_for("clientes")
-        )
-
-
-    except SQLAlchemyError:
+    except SQLAlchemyError as error:
 
         db.rollback()
 
         flash(
-            "Não foi possível alterar o status."
+            "Erro ao alterar status: "
+            + str(error)
         )
-
-        return redirect(
-            url_for("clientes")
-        )
-
 
     finally:
 
         db.close()
 
+    return redirect(
+        url_for("clientes")
+    )
 
-@app.post(
-    "/clientes/<int:cliente_id>/excluir"
+
+# ============================================================
+# EXCLUIR CLIENTE
+# ============================================================
+
+@app.route(
+    "/clientes/<int:cliente_id>/excluir",
+    methods=["POST"],
 )
 @login_required
-def excluir_cliente(
-    cliente_id
-):
+def excluir_cliente(cliente_id):
 
     db = SessionLocal()
 
     try:
 
-        cliente = (
-            db.query(Cliente)
-            .filter(
-                Cliente.id
-                == cliente_id
-            )
-            .first()
+        cliente = obter_cliente(
+            db,
+            cliente_id,
         )
-
 
         if cliente:
 
@@ -2612,33 +2236,31 @@ def excluir_cliente(
                 "Cliente não encontrado."
             )
 
-
-        return redirect(
-            url_for("clientes")
-        )
-
-
-    except SQLAlchemyError:
+    except SQLAlchemyError as error:
 
         db.rollback()
 
         flash(
-            "Não foi possível excluir o cliente."
+            "Erro ao excluir cliente: "
+            + str(error)
         )
-
-        return redirect(
-            url_for("clientes")
-        )
-
 
     finally:
 
         db.close()
 
+    return redirect(
+        url_for("clientes")
+    )
+
+
+# ============================================================
+# IMPORTAÇÃO CSV
+# ============================================================
 
 @app.route(
     "/importar",
-    methods=["GET", "POST"]
+    methods=["GET", "POST"],
 )
 @login_required
 def importar():
@@ -2648,7 +2270,6 @@ def importar():
         arquivo = request.files.get(
             "arquivo"
         )
-
 
         if not arquivo or not arquivo.filename:
 
@@ -2660,399 +2281,416 @@ def importar():
                 url_for("importar")
             )
 
-
-        db = SessionLocal()
-
-        adicionados = 0
-
-        ignorados = 0
-
-
         try:
 
-            import pandas as pd
-
-
-            df = pd.read_csv(
-                arquivo,
-                sep=None,
-                engine="python",
-                dtype=str
+            conteudo = arquivo.read().decode(
+                "utf-8-sig"
             )
 
+        except UnicodeDecodeError:
 
-            colunas = {
-                str(c).strip().lower(): c
-                for c in df.columns
-            }
+            try:
 
+                arquivo.seek(0)
 
-            if (
-                "nome" not in colunas
-                or "usuario" not in colunas
-            ):
+                conteudo = arquivo.read().decode(
+                    "latin-1"
+                )
+
+            except Exception:
 
                 flash(
-                    "O CSV precisa ter as colunas Nome e Usuario."
+                    "Não foi possível ler o arquivo."
                 )
 
                 return redirect(
                     url_for("importar")
                 )
 
+        try:
 
-            for _, row in df.iterrows():
+            amostra = conteudo[:4096]
 
-                nome = str(
-                    row[colunas["nome"]]
-                ).strip()
+            try:
 
-                usuario = str(
-                    row[colunas["usuario"]]
-                ).strip()
-
-
-                if (
-                    not nome
-                    or not usuario
-                    or nome.lower()
-                    == "nan"
-                    or usuario.lower()
-                    == "nan"
-                ):
-
-                    ignorados += 1
-
-                    continue
-
-
-                existe = (
-                    db.query(Cliente)
-                    .filter(
-                        Cliente.usuario
-                        == usuario
-                    )
-                    .first()
+                dialect = csv.Sniffer().sniff(
+                    amostra,
+                    delimiters=",;|",
                 )
 
+                delimitador = dialect.delimiter
 
-                if existe:
+            except csv.Error:
 
-                    ignorados += 1
+                delimitador = ","
 
-                    continue
+            leitor = csv.DictReader(
+                io.StringIO(conteudo),
+                delimiter=delimitador,
+            )
 
+            if not leitor.fieldnames:
 
-                valor = 0.0
-
-
-                if "valor" in colunas:
-
-                    try:
-
-                        bruto = str(
-                            row[
-                                colunas["valor"]
-                            ]
-                        ).strip()
-
-
-                        if (
-                            bruto.lower()
-                            != "nan"
-                            and bruto
-                        ):
-
-                            valor = float(
-
-                                bruto
-                                .replace(
-                                    "R$",
-                                    ""
-                                )
-                                .replace(
-                                    " ",
-                                    ""
-                                )
-                                .replace(
-                                    ".",
-                                    ""
-                                )
-                                .replace(
-                                    ",",
-                                    "."
-                                )
-
-                            )
-
-                    except (
-                        ValueError,
-                        TypeError
-                    ):
-
-                        valor = 0.0
-
-
-                vencimento = None
-
-
-                if "vencimento" in colunas:
-
-                    try:
-
-                        bruto = row[
-                            colunas["vencimento"]
-                        ]
-
-
-                        if (
-                            bruto
-                            and str(bruto).lower()
-                            != "nan"
-                        ):
-
-                            vencimento = (
-                                pd.to_datetime(
-                                    bruto,
-                                    dayfirst=True
-                                ).date()
-                            )
-
-                    except Exception:
-
-                        vencimento = None
-
-
-                db.add(
-                    Cliente(
-                        nome=nome,
-                        usuario=usuario,
-                        valor=valor,
-                        vencimento=vencimento,
-                        status="Pendente"
-                    )
+                flash(
+                    "O CSV não possui cabeçalho."
                 )
 
+                return redirect(
+                    url_for("importar")
+                )
 
-                adicionados += 1
+            # Normaliza nomes das colunas
+            campos = {}
 
+            for campo in leitor.fieldnames:
 
-            db.commit()
+                if campo:
 
+                    campos[
+                        campo.strip().lower()
+                    ] = campo
+
+            nome_campo = None
+            usuario_campo = None
+            valor_campo = None
+            vencimento_campo = None
+
+            for nome in [
+                "nome",
+                "cliente",
+                "name",
+            ]:
+
+                if nome in campos:
+
+                    nome_campo = campos[nome]
+                    break
+
+            for nome in [
+                "usuario",
+                "usuário",
+                "username",
+                "user",
+                "login",
+            ]:
+
+                if nome in campos:
+
+                    usuario_campo = campos[nome]
+                    break
+
+            for nome in [
+                "valor",
+                "preco",
+                "preço",
+                "mensalidade",
+            ]:
+
+                if nome in campos:
+
+                    valor_campo = campos[nome]
+                    break
+
+            for nome in [
+                "vencimento",
+                "vencimento_data",
+                "data_vencimento",
+                "due_date",
+            ]:
+
+                if nome in campos:
+
+                    vencimento_campo = campos[nome]
+                    break
+
+            if not nome_campo or not usuario_campo:
+
+                flash(
+                    "O CSV precisa possuir as colunas "
+                    "'nome' e 'usuario'."
+                )
+
+                return redirect(
+                    url_for("importar")
+                )
+
+            db = SessionLocal()
+
+            adicionados = 0
+            atualizados = 0
+            ignorados = 0
+
+            try:
+
+                for linha in leitor:
+
+                    nome = str(
+                        linha.get(
+                            nome_campo,
+                            "",
+                        )
+                    ).strip()
+
+                    usuario = str(
+                        linha.get(
+                            usuario_campo,
+                            "",
+                        )
+                    ).strip()
+
+                    if not nome or not usuario:
+
+                        ignorados += 1
+                        continue
+
+                    valor = Decimal("0.00")
+
+                    if valor_campo:
+
+                        valor = parse_valor(
+                            linha.get(
+                                valor_campo,
+                                "",
+                            )
+                        )
+
+                    vencimento = None
+
+                    if vencimento_campo:
+
+                        vencimento = parse_data(
+                            linha.get(
+                                vencimento_campo,
+                                "",
+                            )
+                        )
+
+                    existente = db.query(
+                        Cliente
+                    ).filter(
+                        Cliente.usuario == usuario
+                    ).first()
+
+                    if existente:
+
+                        existente.nome = nome
+
+                        if valor_campo:
+                            existente.valor = valor
+
+                        if vencimento_campo:
+                            existente.vencimento = vencimento
+
+                        atualizados += 1
+
+                    else:
+
+                        cliente = Cliente(
+                            nome=nome,
+                            usuario=usuario,
+                            valor=valor,
+                            vencimento=vencimento,
+                            status="Pendente",
+                        )
+
+                        db.add(cliente)
+
+                        adicionados += 1
+
+                db.commit()
+
+                flash(
+                    f"Importação concluída. "
+                    f"Adicionados: {adicionados} | "
+                    f"Atualizados: {atualizados} | "
+                    f"Ignorados: {ignorados}"
+                )
+
+                return redirect(
+                    url_for("clientes")
+                )
+
+            except SQLAlchemyError as error:
+
+                db.rollback()
+
+                flash(
+                    "Erro no banco de dados: "
+                    + str(error)
+                )
+
+            finally:
+
+                db.close()
+
+        except Exception as error:
 
             flash(
-                "Importação concluída: "
-                f"{adicionados} adicionados e "
-                f"{ignorados} ignorados."
+                "Erro ao processar CSV: "
+                + str(error)
             )
 
+    content = """
+    <div class="card">
 
-            return redirect(
-                url_for("clientes")
-            )
+        <div class="section-title">
+            Importar clientes
+        </div>
 
+        <p style="color:#64748b;font-size:14px;">
+            Envie um arquivo CSV para cadastrar vários clientes
+            de uma só vez.
+        </p>
 
-        except Exception:
+        <div
+            style="
+                background:#f8fafc;
+                padding:18px;
+                border-radius:12px;
+                margin:20px 0;
+            "
+        >
 
-            db.rollback()
+            <strong>
+                Formato recomendado:
+            </strong>
 
-            flash(
-                "Não foi possível processar o arquivo CSV."
-            )
+            <br><br>
 
-            return redirect(
-                url_for("importar")
-            )
+            <code>
+                nome,usuario,valor,vencimento
+            </code>
 
+            <br><br>
 
-        finally:
+            Exemplo:
 
-            db.close()
+            <br>
 
+            <code>
+                João Silva,joao123,25,10/10/2026
+            </code>
 
-    content = r"""
+        </div>
 
-<div class="top">
 
-<div>
+        <form
+            method="POST"
+            enctype="multipart/form-data"
+        >
 
-<h1>
-Importar clientes
-</h1>
+            <div class="form-group">
 
-<div class="subtitle">
-Cadastre vários clientes de uma única vez.
-</div>
+                <label>
+                    Arquivo CSV
+                </label>
 
-</div>
+                <input
+                    type="file"
+                    name="arquivo"
+                    accept=".csv,text/csv"
+                    required
+                >
 
-</div>
+            </div>
 
 
-<div class="grid2">
+            <div class="form-actions">
 
+                <button
+                    type="submit"
+                    class="btn btn-primary"
+                >
+                    Importar clientes
+                </button>
 
-<div class="card">
+                <a
+                    href="{{ url_for('clientes') }}"
+                    class="btn btn-secondary"
+                >
+                    Cancelar
+                </a>
 
-<h3>
-Arquivo CSV
-</h3>
+            </div>
 
+        </form>
 
-<p class="subtitle">
-
-Colunas obrigatórias:
-
-<strong>
-Nome
-</strong>
-
-e
-
-<strong>
-Usuario
-</strong>.
-
-Valor e Vencimento são opcionais.
-
-</p>
-
-
-<form
-method="post"
-enctype="multipart/form-data"
->
-
-<input
-type="file"
-name="arquivo"
-accept=".csv"
-required
->
-
-
-<button
-class="btn primary full mt"
->
-
-📥 Importar clientes
-
-</button>
-
-</form>
-
-</div>
-
-
-<div class="card">
-
-<h3>
-Exemplo
-</h3>
-
-
-<table>
-
-<tr>
-
-<th>
-Nome
-</th>
-
-<th>
-Usuario
-</th>
-
-<th>
-Valor
-</th>
-
-<th>
-Vencimento
-</th>
-
-</tr>
-
-
-<tr>
-
-<td>
-João Silva
-</td>
-
-<td>
-joao123
-</td>
-
-<td>
-25
-</td>
-
-<td>
-10/10/2026
-</td>
-
-</tr>
-
-
-<tr>
-
-<td>
-Maria Souza
-</td>
-
-<td>
-maria456
-</td>
-
-<td>
-40
-</td>
-
-<td>
-15/10/2026
-</td>
-
-</tr>
-
-</table>
-
-</div>
-
-</div>
-
-"""
-
+    </div>
+    """
 
     return page(
         content,
         "Importar clientes",
-        "importar"
+        "importar",
     )
 
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.route("/health")
+def health():
+
+    db = SessionLocal()
+
+    try:
+
+        db.execute(
+            __import__("sqlalchemy").text(
+                "SELECT 1"
+            )
+        )
+
+        return {
+            "status": "ok",
+            "database": "connected",
+        }
+
+    except Exception as error:
+
+        return {
+            "status": "error",
+            "database": str(error),
+        }, 500
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
+# ERRO 404
+# ============================================================
 
 @app.errorhandler(404)
-def not_found(error):
+def erro_404(error):
+
+    if session.get("logged_in"):
+        return redirect(
+            url_for("dashboard")
+        )
 
     return redirect(
-        url_for(
-            "dashboard"
-            if session.get("logged_in")
-            else "login"
-        )
+        url_for("login")
     )
 
+
+# ============================================================
+# EXECUÇÃO LOCAL
+# ============================================================
 
 if __name__ == "__main__":
 
     port = int(
         os.getenv(
             "PORT",
-            "10000"
+            "5000",
         )
     )
 
     app.run(
         host="0.0.0.0",
-        port=port
+        port=port,
+        debug=False,
     )
