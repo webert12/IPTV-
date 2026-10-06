@@ -1,5 +1,5 @@
-streamlit
-pandas
-plotly
-sqlalchemy
+Flask
+SQLAlchemy
 psycopg[binary]
+gunicorn
+pandas
