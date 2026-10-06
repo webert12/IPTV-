@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import io
 
+#
 ============================================================
 
 CONFIGURAÇÃO
