@@ -8,11 +8,6 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, Date, Date
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 
-
-# ============================================================
-# CONFIGURAÇÃO
-# ============================================================
-
 st.set_page_config(
     page_title="IPTV Manager",
     page_icon="📺",
@@ -20,80 +15,37 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-
-# ============================================================
-# ESTILO
-# ============================================================
-
 st.markdown(
     """
     <style>
-        .stApp {
-            background-color: #0f1117;
-        }
-
-        [data-testid="stSidebar"] {
-            background-color: #151922;
-        }
-
-        .main-title {
-            font-size: 32px;
-            font-weight: 700;
-            margin-bottom: 5px;
-        }
-
-        .subtitle {
-            color: #9ca3af;
-            font-size: 15px;
-            margin-bottom: 25px;
-        }
-
-        .section-title {
-            font-size: 23px;
-            font-weight: 700;
-            margin-top: 10px;
-            margin-bottom: 15px;
-        }
-
+        .stApp { background-color: #0f1117; }
+        [data-testid="stSidebar"] { background-color: #151922; }
+        .main-title { font-size: 32px; font-weight: 700; margin-bottom: 5px; }
+        .subtitle { color: #9ca3af; font-size: 15px; margin-bottom: 25px; }
+        .section-title { font-size: 23px; font-weight: 700; margin-top: 10px; margin-bottom: 15px; }
         div[data-testid="stMetric"] {
             background-color: #181c25;
             border: 1px solid #272d38;
             padding: 15px;
             border-radius: 14px;
         }
-
-        .stButton > button {
-            border-radius: 9px;
-        }
-
-        footer {
-            visibility: hidden;
-        }
+        .stButton > button { border-radius: 9px; }
+        footer { visibility: hidden; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-
-# ============================================================
-# BANCO DE DADOS
-# ============================================================
-
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
 
 if not DATABASE_URL:
     st.error(
-        "Banco de dados não configurado. "
-        "No Render, configure a variável DATABASE_URL."
+        "Banco de dados não configurado. No Render, configure a variável DATABASE_URL."
     )
     st.stop()
 
 if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace(
-        "postgres://",
-        "postgresql://",
-        1,
-    )
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 engine = create_engine(
     DATABASE_URL,
@@ -110,41 +62,20 @@ SessionLocal = sessionmaker(
 )
 
 
-# ============================================================
-# MODELO DO CLIENTE
-# ============================================================
-
 class Cliente(Base):
     __tablename__ = "clientes"
 
     id = Column(Integer, primary_key=True, index=True)
     nome = Column(String(150), nullable=False)
     usuario = Column(String(150), nullable=False, unique=True, index=True)
-
     valor = Column(Float, nullable=False, default=0.0)
     vencimento = Column(Date, nullable=True)
-
-    status = Column(
-        String(20),
-        nullable=False,
-        default="Pendente",
-    )
-
+    status = Column(String(20), nullable=False, default="Pendente")
     data_pagamento = Column(DateTime, nullable=True)
-
-    criado_em = Column(
-        DateTime,
-        nullable=False,
-        default=datetime.utcnow,
-    )
+    criado_em = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 Base.metadata.create_all(bind=engine)
-
-
-# ============================================================
-# LOGIN
-# ============================================================
 
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
@@ -177,9 +108,7 @@ def tela_login():
             ">
                 <div style="font-size:55px;">📺</div>
                 <h1>IPTV Manager</h1>
-                <p style="color:#9ca3af;">
-                    Painel de gerenciamento de clientes
-                </p>
+                <p style="color:#9ca3af;">Painel de gerenciamento de clientes</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -187,22 +116,10 @@ def tela_login():
 
         st.write("")
 
-        usuario = st.text_input(
-            "Usuário",
-            placeholder="Digite o usuário",
-        )
+        usuario = st.text_input("Usuário", placeholder="Digite o usuário")
+        senha = st.text_input("Senha", type="password", placeholder="Digite a senha")
 
-        senha = st.text_input(
-            "Senha",
-            type="password",
-            placeholder="Digite a senha",
-        )
-
-        if st.button(
-            "Entrar",
-            use_container_width=True,
-            type="primary",
-        ):
+        if st.button("Entrar", use_container_width=True, type="primary"):
             if verificar_login(usuario, senha):
                 st.session_state.logado = True
                 st.rerun()
@@ -215,13 +132,8 @@ if not st.session_state.logado:
     st.stop()
 
 
-# ============================================================
-# FUNÇÕES DO BANCO
-# ============================================================
-
 def obter_clientes():
     db = SessionLocal()
-
     try:
         return db.query(Cliente).order_by(Cliente.nome.asc()).all()
     finally:
@@ -230,7 +142,6 @@ def obter_clientes():
 
 def adicionar_cliente(nome, usuario, valor, vencimento):
     db = SessionLocal()
-
     try:
         nome = str(nome).strip()
         usuario = str(usuario).strip()
@@ -257,26 +168,17 @@ def adicionar_cliente(nome, usuario, valor, vencimento):
 
         db.add(cliente)
         db.commit()
-
         return True, "Cliente cadastrado com sucesso."
 
     except SQLAlchemyError as e:
         db.rollback()
         return False, f"Erro ao cadastrar cliente: {e}"
-
     finally:
         db.close()
 
 
-def atualizar_cliente(
-    cliente_id,
-    nome,
-    usuario,
-    valor,
-    vencimento,
-):
+def atualizar_cliente(cliente_id, nome, usuario, valor, vencimento):
     db = SessionLocal()
-
     try:
         cliente = (
             db.query(Cliente)
@@ -299,26 +201,29 @@ def atualizar_cliente(
         if outro:
             return False, "Esse nome de usuário já pertence a outro cliente."
 
-        cliente.nome = str(nome).strip()
-        cliente.usuario = str(usuario).strip()
+        nome = str(nome).strip()
+        usuario = str(usuario).strip()
+
+        if not nome or not usuario:
+            return False, "Nome e usuário são obrigatórios."
+
+        cliente.nome = nome
+        cliente.usuario = usuario
         cliente.valor = float(valor)
         cliente.vencimento = vencimento
 
         db.commit()
-
         return True, "Cliente atualizado com sucesso."
 
     except SQLAlchemyError as e:
         db.rollback()
         return False, f"Erro ao atualizar cliente: {e}"
-
     finally:
         db.close()
 
 
 def excluir_cliente(cliente_id):
     db = SessionLocal()
-
     try:
         cliente = (
             db.query(Cliente)
@@ -331,20 +236,17 @@ def excluir_cliente(cliente_id):
 
         db.delete(cliente)
         db.commit()
-
         return True, "Cliente excluído com sucesso."
 
     except SQLAlchemyError as e:
         db.rollback()
         return False, f"Erro ao excluir cliente: {e}"
-
     finally:
         db.close()
 
 
 def alterar_status(cliente_id, status):
     db = SessionLocal()
-
     try:
         cliente = (
             db.query(Cliente)
@@ -363,35 +265,25 @@ def alterar_status(cliente_id, status):
             cliente.data_pagamento = None
 
         db.commit()
-
         return True
 
     except SQLAlchemyError:
         db.rollback()
         return False
-
     finally:
         db.close()
 
 
 def importar_clientes(df):
     db = SessionLocal()
-
     adicionados = 0
     ignorados = 0
 
     try:
-        colunas = {
-            str(c).strip().lower(): c
-            for c in df.columns
-        }
+        colunas = {str(c).strip().lower(): c for c in df.columns}
 
         if "nome" not in colunas or "usuario" not in colunas:
-            return (
-                0,
-                0,
-                "O arquivo precisa conter as colunas: Nome e Usuario.",
-            )
+            return 0, 0, "O arquivo precisa conter as colunas: Nome e Usuario."
 
         coluna_nome = colunas["nome"]
         coluna_usuario = colunas["usuario"]
@@ -402,11 +294,7 @@ def importar_clientes(df):
             nome = str(linha[coluna_nome]).strip()
             usuario = str(linha[coluna_usuario]).strip()
 
-            if not nome or not usuario or nome.lower() == "nan":
-                ignorados += 1
-                continue
-
-            if usuario.lower() == "nan":
+            if not nome or not usuario or nome.lower() == "nan" or usuario.lower() == "nan":
                 ignorados += 1
                 continue
 
@@ -422,11 +310,10 @@ def importar_clientes(df):
 
             valor = 0.0
 
-            if coluna_valor:
+            if coluna_valor is not None:
                 try:
-                    valor_bruto = str(linha[coluna_valor])
-
-                    if valor_bruto.lower() != "nan":
+                    valor_bruto = str(linha[coluna_valor]).strip()
+                    if valor_bruto.lower() != "nan" and valor_bruto:
                         valor = float(
                             valor_bruto
                             .replace("R$", "")
@@ -439,7 +326,7 @@ def importar_clientes(df):
 
             vencimento = None
 
-            if coluna_vencimento:
+            if coluna_vencimento is not None:
                 try:
                     valor_data = linha[coluna_vencimento]
 
@@ -468,22 +355,11 @@ def importar_clientes(df):
             adicionados += 1
 
         db.commit()
-
-        return (
-            adicionados,
-            ignorados,
-            "Importação concluída.",
-        )
+        return adicionados, ignorados, "Importação concluída."
 
     except Exception as e:
         db.rollback()
-
-        return (
-            adicionados,
-            ignorados,
-            f"Erro na importação: {e}",
-        )
-
+        return adicionados, ignorados, f"Erro na importação: {e}"
     finally:
         db.close()
 
@@ -499,7 +375,6 @@ def formatar_reais(valor):
 
 def dataframe_clientes():
     clientes = obter_clientes()
-
     dados = []
 
     for cliente in clientes:
@@ -526,22 +401,13 @@ def dataframe_clientes():
     return pd.DataFrame(dados)
 
 
-# ============================================================
-# SIDEBAR
-# ============================================================
-
 with st.sidebar:
     st.markdown(
         """
-        <div style="
-            text-align:center;
-            padding:10px 0 25px 0;
-        ">
+        <div style="text-align:center; padding:10px 0 25px 0;">
             <div style="font-size:48px;">📺</div>
             <h2 style="margin:0;">IPTV Manager</h2>
-            <p style="color:#9ca3af;">
-                Painel administrativo
-            </p>
+            <p style="color:#9ca3af;">Painel administrativo</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -559,122 +425,65 @@ with st.sidebar:
 
     st.divider()
 
-    if st.button(
-        "🚪 Sair",
-        use_container_width=True,
-    ):
+    if st.button("🚪 Sair", use_container_width=True):
         st.session_state.logado = False
+        st.session_state.editar_cliente = None
         st.rerun()
 
-
-# ============================================================
-# DASHBOARD
-# ============================================================
 
 if pagina == "📊 Dashboard":
     clientes = obter_clientes()
 
     total_clientes = len(clientes)
+    pagos = [cliente for cliente in clientes if cliente.status == "Pago"]
+    pendentes = [cliente for cliente in clientes if cliente.status == "Pendente"]
 
-    pagos = [
-        cliente for cliente in clientes
-        if cliente.status == "Pago"
-    ]
-
-    pendentes = [
-        cliente for cliente in clientes
-        if cliente.status == "Pendente"
-    ]
-
-    total_pago = sum(
-        float(cliente.valor or 0)
-        for cliente in pagos
-    )
-
-    total_pendente = sum(
-        float(cliente.valor or 0)
-        for cliente in pendentes
-    )
-
+    total_pago = sum(float(cliente.valor or 0) for cliente in pagos)
+    total_pendente = sum(float(cliente.valor or 0) for cliente in pendentes)
     total_previsto = total_pago + total_pendente
 
+    st.markdown('<div class="main-title">📊 Dashboard</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="main-title">📊 Dashboard</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        '<div class="subtitle">'
-        'Visão geral do seu sistema de clientes IPTV'
-        '</div>',
+        '<div class="subtitle">Visão geral do seu sistema de clientes IPTV</div>',
         unsafe_allow_html=True,
     )
 
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-        st.metric(
-            "👥 Total de clientes",
-            total_clientes,
-        )
+        st.metric("👥 Total de clientes", total_clientes)
 
     with c2:
-        st.metric(
-            "🟢 Clientes pagos",
-            len(pagos),
-        )
+        st.metric("🟢 Clientes pagos", len(pagos))
 
     with c3:
-        st.metric(
-            "🟡 Pendentes",
-            len(pendentes),
-        )
+        st.metric("🟡 Pendentes", len(pendentes))
 
     with c4:
-        st.metric(
-            "💰 Total recebido",
-            formatar_reais(total_pago),
-        )
+        st.metric("💰 Total recebido", formatar_reais(total_pago))
 
     st.write("")
 
     c1, c2 = st.columns(2)
 
     with c1:
-        st.metric(
-            "💵 Valor pendente",
-            formatar_reais(total_pendente),
-        )
+        st.metric("💵 Valor pendente", formatar_reais(total_pendente))
 
     with c2:
-        st.metric(
-            "📈 Faturamento previsto",
-            formatar_reais(total_previsto),
-        )
+        st.metric("📈 Faturamento previsto", formatar_reais(total_previsto))
 
     st.write("")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown(
-            '<div class="section-title">'
-            '📊 Pagos x Pendentes'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<div class="section-title">📊 Pagos x Pendentes</div>', unsafe_allow_html=True)
 
         if total_clientes > 0:
             dados_status = pd.DataFrame(
                 {
-                    "Status": [
-                        "Pagos",
-                        "Pendentes",
-                    ],
-                    "Quantidade": [
-                        len(pagos),
-                        len(pendentes),
-                    ],
+                    "Status": ["Pagos", "Pendentes"],
+                    "Quantidade": [len(pagos), len(pendentes)],
                 }
             )
 
@@ -689,39 +498,20 @@ if pagina == "📊 Dashboard":
                 template="plotly_dark",
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
-                margin=dict(
-                    l=10,
-                    r=10,
-                    t=20,
-                    b=20,
-                ),
+                margin=dict(l=10, r=10, t=20, b=20),
             )
 
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-            )
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Ainda não existem clientes cadastrados.")
 
     with col2:
-        st.markdown(
-            '<div class="section-title">'
-            '💰 Valores'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<div class="section-title">💰 Valores</div>', unsafe_allow_html=True)
 
         dados_valores = pd.DataFrame(
             {
-                "Status": [
-                    "Recebido",
-                    "Pendente",
-                ],
-                "Valor": [
-                    total_pago,
-                    total_pendente,
-                ],
+                "Status": ["Recebido", "Pendente"],
+                "Valor": [total_pago, total_pendente],
             }
         )
 
@@ -736,41 +526,20 @@ if pagina == "📊 Dashboard":
             template="plotly_dark",
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
-            margin=dict(
-                l=10,
-                r=10,
-                t=20,
-                b=20,
-            ),
+            margin=dict(l=10, r=10, t=20, b=20),
             yaxis_title="Valor (R$)",
             xaxis_title="",
         )
 
-        st.plotly_chart(
-            fig2,
-            use_container_width=True,
-        )
+        st.plotly_chart(fig2, use_container_width=True)
 
-    st.markdown(
-        '<div class="section-title">'
-        '👥 Clientes'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="section-title">👥 Clientes</div>', unsafe_allow_html=True)
 
     df = dataframe_clientes()
 
     if not df.empty:
         st.dataframe(
-            df[
-                [
-                    "Nome",
-                    "Usuário",
-                    "Valor",
-                    "Vencimento",
-                    "Status",
-                ]
-            ],
+            df[["Nome", "Usuário", "Valor", "Vencimento", "Status"]],
             use_container_width=True,
             hide_index=True,
         )
@@ -778,20 +547,10 @@ if pagina == "📊 Dashboard":
         st.info("Nenhum cliente cadastrado.")
 
 
-# ============================================================
-# CLIENTES
-# ============================================================
-
 elif pagina == "👥 Clientes":
+    st.markdown('<div class="main-title">👥 Clientes</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="main-title">👥 Clientes</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        '<div class="subtitle">'
-        'Gerencie seus clientes, pagamentos e pendências.'
-        '</div>',
+        '<div class="subtitle">Gerencie seus clientes, pagamentos e pendências.</div>',
         unsafe_allow_html=True,
     )
 
@@ -804,18 +563,13 @@ elif pagina == "👥 Clientes":
 
     status_filtro = st.selectbox(
         "Filtrar por status",
-        [
-            "Todos",
-            "Pago",
-            "Pendente",
-        ],
+        ["Todos", "Pago", "Pendente"],
     )
 
     clientes_filtrados = clientes
 
     if pesquisa:
         termo = pesquisa.lower()
-
         clientes_filtrados = [
             cliente
             for cliente in clientes_filtrados
@@ -830,44 +584,27 @@ elif pagina == "👥 Clientes":
             if cliente.status == status_filtro
         ]
 
-    st.write(
-        f"**{len(clientes_filtrados)}** cliente(s) encontrado(s)"
-    )
+    st.write(f"**{len(clientes_filtrados)}** cliente(s) encontrado(s)")
 
     for cliente in clientes_filtrados:
-        cor = (
-            "#22c55e"
-            if cliente.status == "Pago"
-            else "#facc15"
-        )
+        cor = "#22c55e" if cliente.status == "Pago" else "#facc15"
 
         with st.container(border=True):
-            col1, col2, col3, col4 = st.columns(
-                [3, 2, 1.5, 2]
-            )
+            col1, col2, col3, col4 = st.columns([3, 2, 1.5, 2])
 
             with col1:
                 st.markdown(
                     f"""
-                    <div style="
-                        color:{cor};
-                        font-size:18px;
-                        font-weight:700;
-                    ">
+                    <div style="color:{cor}; font-size:18px; font-weight:700;">
                         {cliente.nome}
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
-
-                st.caption(
-                    f"Usuário: {cliente.usuario}"
-                )
+                st.caption(f"Usuário: {cliente.usuario}")
 
             with col2:
-                st.write(
-                    formatar_reais(cliente.valor)
-                )
+                st.write(formatar_reais(cliente.valor))
 
                 if cliente.vencimento:
                     st.caption(
@@ -891,22 +628,20 @@ elif pagina == "👥 Clientes":
                             key=f"pend_{cliente.id}",
                             use_container_width=True,
                         ):
-                            alterar_status(
-                                cliente.id,
-                                "Pendente",
-                            )
-                            st.rerun()
+                            if alterar_status(cliente.id, "Pendente"):
+                                st.rerun()
+                            else:
+                                st.error("Não foi possível alterar o status.")
                     else:
                         if st.button(
                             "💰 Pagar",
                             key=f"pagar_{cliente.id}",
                             use_container_width=True,
                         ):
-                            alterar_status(
-                                cliente.id,
-                                "Pago",
-                            )
-                            st.rerun()
+                            if alterar_status(cliente.id, "Pago"):
+                                st.rerun()
+                            else:
+                                st.error("Não foi possível alterar o status.")
 
                 with b2:
                     if st.button(
@@ -915,20 +650,14 @@ elif pagina == "👥 Clientes":
                         use_container_width=True,
                     ):
                         st.session_state.editar_cliente = cliente.id
+                        st.rerun()
 
             if st.session_state.editar_cliente == cliente.id:
                 st.divider()
-
                 st.markdown("### ✏️ Editar cliente")
 
-                with st.form(
-                    f"form_editar_{cliente.id}"
-                ):
-                    nome = st.text_input(
-                        "Nome",
-                        value=cliente.nome,
-                    )
-
+                with st.form(f"form_editar_{cliente.id}"):
+                    nome = st.text_input("Nome", value=cliente.nome)
                     usuario = st.text_input(
                         "Nome de usuário",
                         value=cliente.usuario,
@@ -943,11 +672,7 @@ elif pagina == "👥 Clientes":
 
                     vencimento = st.date_input(
                         "Data de vencimento",
-                        value=(
-                            cliente.vencimento
-                            if cliente.vencimento
-                            else date.today()
-                        ),
+                        value=cliente.vencimento or date.today(),
                     )
 
                     c1, c2 = st.columns(2)
@@ -996,9 +721,7 @@ elif pagina == "👥 Clientes":
                         key=f"excluir_{cliente.id}",
                         type="secondary",
                     ):
-                        sucesso, mensagem = excluir_cliente(
-                            cliente.id
-                        )
+                        sucesso, mensagem = excluir_cliente(cliente.id)
 
                         if sucesso:
                             st.success(mensagem)
@@ -1008,22 +731,10 @@ elif pagina == "👥 Clientes":
                             st.error(mensagem)
 
 
-# ============================================================
-# ADICIONAR CLIENTE
-# ============================================================
-
 elif pagina == "➕ Adicionar Cliente":
+    st.markdown('<div class="main-title">➕ Adicionar Cliente</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="main-title">'
-        '➕ Adicionar Cliente'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        '<div class="subtitle">'
-        'Cadastre um novo cliente no sistema.'
-        '</div>',
+        '<div class="subtitle">Cadastre um novo cliente no sistema.</div>',
         unsafe_allow_html=True,
     )
 
@@ -1079,28 +790,15 @@ elif pagina == "➕ Adicionar Cliente":
                     st.error(mensagem)
 
 
-# ============================================================
-# IMPORTAR CLIENTES
-# ============================================================
-
 elif pagina == "📥 Importar Clientes":
+    st.markdown('<div class="main-title">📥 Importar Clientes</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="main-title">'
-        '📥 Importar Clientes'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        '<div class="subtitle">'
-        'Adicione vários clientes de uma única vez.'
-        '</div>',
+        '<div class="subtitle">Adicione vários clientes de uma única vez.</div>',
         unsafe_allow_html=True,
     )
 
     st.info(
-        "O arquivo CSV deve possuir pelo menos as colunas "
-        "**Nome** e **Usuario**. "
+        "O arquivo CSV deve possuir pelo menos as colunas **Nome** e **Usuario**. "
         "As colunas **Valor** e **Vencimento** são opcionais."
     )
 
@@ -1108,22 +806,10 @@ elif pagina == "📥 Importar Clientes":
 
     exemplo = pd.DataFrame(
         {
-            "Nome": [
-                "João Silva",
-                "Maria Souza",
-            ],
-            "Usuario": [
-                "joao123",
-                "maria456",
-            ],
-            "Valor": [
-                25,
-                40,
-            ],
-            "Vencimento": [
-                "10/10/2026",
-                "15/10/2026",
-            ],
+            "Nome": ["João Silva", "Maria Souza"],
+            "Usuario": ["joao123", "maria456"],
+            "Valor": [25, 40],
+            "Vencimento": ["10/10/2026", "15/10/2026"],
         }
     )
 
@@ -1146,9 +832,7 @@ elif pagina == "📥 Importar Clientes":
                 engine="python",
             )
 
-            st.write(
-                f"**{len(df_importacao)}** registros encontrados."
-            )
+            st.write(f"**{len(df_importacao)}** registros encontrados.")
 
             st.dataframe(
                 df_importacao,
@@ -1177,18 +861,14 @@ elif pagina == "📥 Importar Clientes":
 
                 if adicionados == 0:
                     st.error(mensagem)
+                else:
+                    st.info(mensagem)
 
                 st.rerun()
 
         except Exception as e:
-            st.error(
-                f"Não foi possível ler o arquivo: {e}"
-            )
+            st.error(f"Não foi possível ler o arquivo: {e}")
 
-
-# ============================================================
-# RODAPÉ
-# ============================================================
 
 st.sidebar.markdown(
     """
@@ -1203,7 +883,3 @@ st.sidebar.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-Atenção: no GitHub, copie todo o conteúdo dentro do bloco, começando em "import os" e terminando no final do arquivo. Não copie os ```.
-
-Depois de salvar o "app.py", o próximo ponto importante é o PostgreSQL no Render e as variáveis "DATABASE_URL", "ADMIN_USER" e "ADMIN_PASSWORD"; sem elas o sistema não conseguirá iniciar corretamente.
