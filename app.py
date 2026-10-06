@@ -11,12 +11,7 @@ import hashlib
 import hmac
 import io
 
-#
-============================================================
-
 CONFIGURAÇÃO
-
-============================================================
 
 st.set_page_config(
 page_title="IPTV Manager",
