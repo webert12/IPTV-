@@ -3,3 +3,5 @@ SQLAlchemy
 psycopg[binary]
 gunicorn
 pandas
+requests
+cryptography
