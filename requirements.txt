@@ -5,3 +5,5 @@ gunicorn
 pandas
 requests
 cryptography
+pagamento.py
+requirements_pagamento.txt
