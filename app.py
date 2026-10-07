@@ -1,4 +1,5 @@
 import os
+import calendar
 from datetime import datetime, date
 from functools import wraps
 from collections import defaultdict
@@ -25,7 +26,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
-from werkzeug.security import check_password_hash, generate_password_hash
 
 
 # ============================================================
@@ -213,6 +213,58 @@ def formatar_data(valor):
         )
 
     return str(valor)
+
+
+# ============================================================
+# NOVA FUNÇÃO:
+# PRÓXIMO VENCIMENTO APÓS PAGAMENTO
+# ============================================================
+
+def calcular_proximo_vencimento(vencimento_atual):
+
+    if not vencimento_atual:
+        return None
+
+    ano = vencimento_atual.year
+    mes = vencimento_atual.month
+    dia = vencimento_atual.day
+
+    # Avança para o próximo mês
+    if mes == 12:
+        mes = 1
+        ano += 1
+    else:
+        mes += 1
+
+    # Garante que o dia exista no próximo mês.
+    # Exemplo:
+    # 31/01 -> 28/02 ou 29/02
+    ultimo_dia = calendar.monthrange(
+        ano,
+        mes
+    )[1]
+
+    dia = min(
+        dia,
+        ultimo_dia
+    )
+
+    novo_vencimento = date(
+        ano,
+        mes,
+        dia
+    )
+
+    # Regra solicitada:
+    # 10/10/2026 -> 11/11/2026
+    novo_vencimento = (
+        novo_vencimento
+        .fromordinal(
+            novo_vencimento.toordinal() + 1
+        )
+    )
+
+    return novo_vencimento
 
 
 def obter_resumo(db):
@@ -436,7 +488,6 @@ BASE = r"""
 <title>
     {{ title }} · IPTV Manager
 </title>
-
 
 <style>
 
@@ -1116,7 +1167,7 @@ label {
     display: grid;
 
     grid-template-columns:
-        32px 2fr 1fr 1fr 1fr auto;
+        2fr 1fr 1fr 1fr auto;
 
     gap: 15px;
 
@@ -1145,18 +1196,6 @@ label {
 
     transform:
         translateY(-1px);
-}
-
-
-.select-client {
-
-    width: 18px;
-    height: 18px;
-
-    cursor: pointer;
-
-    accent-color:
-        #3b82f6;
 }
 
 
@@ -1534,101 +1573,6 @@ label {
 }
 
 
-.bulk-toolbar {
-
-    display: flex;
-
-    justify-content: space-between;
-
-    align-items: center;
-
-    gap: 12px;
-
-    flex-wrap: wrap;
-
-    padding: 13px 15px;
-
-    margin-bottom: 14px;
-
-    border:
-        1px solid var(--border);
-
-    border-radius: 13px;
-
-    background:
-        rgba(15,23,42,.75);
-}
-
-
-.select-all-label {
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 9px;
-
-    margin: 0;
-
-    cursor: pointer;
-
-    color: #cbd5e1;
-
-    font-size: 13px;
-}
-
-
-.select-all-label input {
-
-    width: 18px;
-    height: 18px;
-
-    accent-color:
-        #3b82f6;
-
-    cursor: pointer;
-}
-
-
-.bulk-actions {
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 8px;
-
-    flex-wrap: wrap;
-}
-
-
-.bulk-count {
-
-    font-size: 12px;
-
-    color: var(--muted);
-
-    margin-right: 3px;
-}
-
-
-.danger-all {
-
-    background:
-        linear-gradient(
-            135deg,
-            #dc2626,
-            #991b1b
-        );
-
-    color: white;
-
-    border:
-        1px solid
-        rgba(248,113,113,.25);
-}
-
-
 table {
 
     width: 100%;
@@ -1682,117 +1626,6 @@ th {
 }
 
 
-.login-page {
-
-    min-height:
-        100vh;
-
-    display:
-        grid;
-
-    place-items:
-        center;
-
-    padding:
-        20px;
-
-    background:
-        radial-gradient(
-            circle at 10% 10%,
-            rgba(37,99,235,.18),
-            transparent 35%
-        ),
-        linear-gradient(
-            135deg,
-            #060910,
-            #0b1220
-        );
-}
-
-
-.login {
-
-    width:
-        min(420px, 100%);
-
-    background:
-        rgba(17,24,39,.96);
-
-    border:
-        1px solid var(--border);
-
-    border-radius:
-        21px;
-
-    padding:
-        32px;
-
-    box-shadow:
-        0 25px 80px
-        rgba(0,0,0,.40);
-}
-
-
-.login-brand {
-
-    text-align:
-        center;
-
-    margin-bottom:
-        26px;
-}
-
-
-.login-brand .brand-icon {
-
-    margin:
-        auto;
-}
-
-
-.login h1 {
-
-    margin-top:
-        14px;
-
-    font-size:
-        25px;
-}
-
-
-.login .subtitle {
-
-    margin-top:
-        5px;
-}
-
-
-.login-error {
-
-    background:
-        rgba(239,68,68,.12);
-
-    color:
-        #fecaca;
-
-    border:
-        1px solid
-        rgba(239,68,68,.20);
-
-    padding:
-        11px;
-
-    border-radius:
-        9px;
-
-    margin-bottom:
-        12px;
-
-    font-size:
-        13px;
-}
-
-
 @media(max-width:1100px) {
 
     .grid {
@@ -1805,7 +1638,7 @@ th {
     .client {
 
         grid-template-columns:
-            32px 1fr 1fr;
+            1fr 1fr;
     }
 
 }
@@ -1911,17 +1744,7 @@ th {
     .client {
 
         grid-template-columns:
-            28px 1fr;
-    }
-
-
-    .client > div:nth-child(3),
-    .client > div:nth-child(4),
-    .client > div:nth-child(5),
-    .client > div:nth-child(6) {
-
-        grid-column:
-            2;
+            1fr;
     }
 
 
@@ -1945,23 +1768,13 @@ th {
             8px;
     }
 
-
-    .bulk-toolbar {
-
-        align-items:
-            flex-start;
-    }
-
 }
-
 
 </style>
 
 </head>
 
-
 <body>
-
 
 <button
     class="mobile-menu"
@@ -1970,12 +1783,9 @@ th {
     ☰
 </button>
 
-
 <div class="layout">
 
-
 <aside class="sidebar">
-
 
 <div class="brand">
 
@@ -1997,14 +1807,11 @@ th {
 
 </div>
 
-
 <div class="nav-title">
     Menu principal
 </div>
 
-
 <nav class="nav">
-
 
 <a
     class="{{ 'active' if active=='dashboard' else '' }}"
@@ -2014,7 +1821,6 @@ th {
     <span>Dashboard</span>
 </a>
 
-
 <a
     class="{{ 'active' if active=='clientes' else '' }}"
     href="{{ url_for('clientes') }}"
@@ -2022,7 +1828,6 @@ th {
     👥
     <span>Clientes</span>
 </a>
-
 
 <a
     class="{{ 'active' if active=='novo' else '' }}"
@@ -2032,7 +1837,6 @@ th {
     <span>Adicionar cliente</span>
 </a>
 
-
 <a
     class="{{ 'active' if active=='importar' else '' }}"
     href="{{ url_for('importar') }}"
@@ -2041,9 +1845,7 @@ th {
     <span>Importar clientes</span>
 </a>
 
-
 </nav>
-
 
 <div class="sidebar-footer">
 
@@ -2056,12 +1858,9 @@ th {
 
 </div>
 
-
 </aside>
 
-
 <main class="main">
-
 
 {% with messages = get_flashed_messages() %}
 
@@ -2075,15 +1874,11 @@ th {
 
 {% endwith %}
 
-
 {{ content | safe }}
-
 
 </main>
 
-
 </div>
-
 
 </body>
 
@@ -2109,11 +1904,9 @@ LOGIN = r"""
     content="width=device-width,initial-scale=1"
 >
 
-
 <title>
     Login · IPTV Manager
 </title>
-
 
 <style>
 
@@ -2121,7 +1914,6 @@ LOGIN = r"""
     box-sizing:
         border-box;
 }
-
 
 body {
 
@@ -2155,7 +1947,6 @@ body {
         sans-serif;
 }
 
-
 .login {
 
     width:
@@ -2177,7 +1968,6 @@ body {
         0 25px 80px
         rgba(0,0,0,.40);
 }
-
 
 .icon {
 
@@ -2206,7 +1996,6 @@ body {
         29px;
 }
 
-
 h1 {
 
     text-align:
@@ -2218,7 +2007,6 @@ h1 {
     font-size:
         26px;
 }
-
 
 .sub {
 
@@ -2235,7 +2023,6 @@ h1 {
         13px;
 }
 
-
 label {
 
     display:
@@ -2250,7 +2037,6 @@ label {
     margin:
         13px 0 7px;
 }
-
 
 input {
 
@@ -2279,13 +2065,11 @@ input {
         none;
 }
 
-
 input:focus {
 
     border-color:
         #3b82f6;
 }
-
 
 button {
 
@@ -2324,7 +2108,6 @@ button {
         pointer;
 }
 
-
 .error {
 
     background:
@@ -2354,27 +2137,21 @@ button {
 
 </head>
 
-
 <body>
 
-
 <div class="login">
-
 
 <div class="icon">
     📺
 </div>
 
-
 <h1>
     IPTV Manager
 </h1>
 
-
 <div class="sub">
     Painel administrativo
 </div>
-
 
 {% if error %}
 
@@ -2384,14 +2161,11 @@ button {
 
 {% endif %}
 
-
 <form method="post">
-
 
 <label>
     Usuário
 </label>
-
 
 <input
     name="usuario"
@@ -2400,11 +2174,9 @@ button {
     placeholder="Digite seu usuário"
 >
 
-
 <label>
     Senha
 </label>
-
 
 <input
     type="password"
@@ -2414,17 +2186,13 @@ button {
     placeholder="Digite sua senha"
 >
 
-
 <button>
     Entrar no sistema
 </button>
 
-
 </form>
 
-
 </div>
-
 
 </body>
 
@@ -2433,7 +2201,7 @@ button {
 
 
 # ============================================================
-# RENDERIZAÇÃO DAS PÁGINAS
+# RENDERIZAÇÃO
 # ============================================================
 
 def page(
@@ -2577,7 +2345,6 @@ def dashboard():
 
 <div class="top">
 
-
 <div>
 
 <h1>
@@ -2589,7 +2356,6 @@ def dashboard():
 </div>
 
 </div>
-
 
 <div class="actions">
 
@@ -2609,12 +2375,9 @@ def dashboard():
 
 </div>
 
-
 </div>
 
-
 <div class="grid">
-
 
 <div class="card">
 
@@ -2632,7 +2395,6 @@ def dashboard():
 
 </div>
 
-
 <div class="card">
 
 <div class="metric-label">
@@ -2648,7 +2410,6 @@ def dashboard():
 </div>
 
 </div>
-
 
 <div class="card">
 
@@ -2666,7 +2427,6 @@ def dashboard():
 
 </div>
 
-
 <div class="card">
 
 <div class="metric-label">
@@ -2683,12 +2443,9 @@ def dashboard():
 
 </div>
 
-
 </div>
 
-
 <div class="grid2">
-
 
 <div class="card chart-card">
 
@@ -2700,18 +2457,15 @@ def dashboard():
     Evolução dos pagamentos registrados
 </div>
 
-
 <div class="chart-bars">
 
 {% for item in grafico_mensal %}
 
 <div class="chart-column">
 
-
 <div class="chart-value">
     {{ dinheiro(item.valor) }}
 </div>
-
 
 <div
     class="chart-bar"
@@ -2721,11 +2475,9 @@ def dashboard():
     "
 ></div>
 
-
 <div class="chart-label">
     {{ item.label }}
 </div>
-
 
 </div>
 
@@ -2733,9 +2485,7 @@ def dashboard():
 
 </div>
 
-
 </div>
-
 
 <div class="card">
 
@@ -2747,10 +2497,8 @@ def dashboard():
     Situação atual da receita
 </div>
 
-
 <div class="financial"
      style="margin-top:25px;">
-
 
 {% set recebido_percentual =
     (resumo.recebido / resumo.previsto * 100)
@@ -2758,21 +2506,17 @@ def dashboard():
     else 0
 %}
 
-
 {% set pendente_percentual =
     (resumo.pendente_valor / resumo.previsto * 100)
     if resumo.previsto
     else 0
 %}
 
-
 <div class="financial-row">
-
 
 <strong>
     Recebido
 </strong>
-
 
 <div class="financial-track">
 
@@ -2783,22 +2527,17 @@ def dashboard():
 
 </div>
 
-
 <strong class="green">
     {{ dinheiro(resumo.recebido) }}
 </strong>
 
-
 </div>
 
-
 <div class="financial-row">
-
 
 <strong>
     Pendente
 </strong>
-
 
 <div class="financial-track">
 
@@ -2809,20 +2548,15 @@ def dashboard():
 
 </div>
 
-
 <strong class="yellow">
     {{ dinheiro(resumo.pendente_valor) }}
 </strong>
 
-
 </div>
 
-
 </div>
-
 
 <div class="progress-wrap">
-
 
 <div style="
     display:flex;
@@ -2841,7 +2575,6 @@ def dashboard():
 
 </div>
 
-
 <div class="progress">
 
 <span
@@ -2852,9 +2585,7 @@ def dashboard():
 
 </div>
 
-
 </div>
-
 
 <div
     style="
@@ -2864,7 +2595,6 @@ def dashboard():
         margin-top:18px;
     "
 >
-
 
 <div class="detail-box">
 
@@ -2878,7 +2608,6 @@ def dashboard():
 
 </div>
 
-
 <div class="detail-box">
 
 <div class="detail-label">
@@ -2891,21 +2620,16 @@ def dashboard():
 
 </div>
 
+</div>
 
 </div>
 
-
 </div>
-
-
-</div>
-
 
 <div
     class="grid2"
     style="margin-top:18px;"
 >
-
 
 <div class="card">
 
@@ -2917,20 +2641,16 @@ def dashboard():
     Últimos cadastros realizados
 </div>
 
-
 <div
     class="recent"
     style="margin-top:15px;"
 >
 
-
 {% if recentes %}
 
 {% for cliente in recentes %}
 
-
 <div class="recent-item">
-
 
 <div>
 
@@ -2943,7 +2663,6 @@ def dashboard():
 </div>
 
 </div>
-
 
 <div>
 
@@ -2959,12 +2678,9 @@ def dashboard():
 
 </div>
 
-
 </div>
 
-
 {% endfor %}
-
 
 {% else %}
 
@@ -2974,12 +2690,9 @@ def dashboard():
 
 {% endif %}
 
-
 </div>
 
-
 </div>
-
 
 <div class="card">
 
@@ -2991,7 +2704,6 @@ def dashboard():
     Atalhos para as funções principais
 </div>
 
-
 <div
     style="
         display:grid;
@@ -3001,14 +2713,12 @@ def dashboard():
     "
 >
 
-
 <a
     class="btn primary"
     href="{{ url_for('novo_cliente') }}"
 >
     ➕ Cadastrar
 </a>
-
 
 <a
     class="btn secondary"
@@ -3017,14 +2727,12 @@ def dashboard():
     👥 Clientes
 </a>
 
-
 <a
     class="btn secondary"
     href="{{ url_for('importar') }}"
 >
     📥 Importar
 </a>
-
 
 <a
     class="btn secondary"
@@ -3033,9 +2741,7 @@ def dashboard():
     🟢 Sistema
 </a>
 
-
 </div>
-
 
 <div
     class="detail-box"
@@ -3052,9 +2758,7 @@ def dashboard():
 
 </div>
 
-
 </div>
-
 
 </div>
 
@@ -3146,11 +2850,9 @@ def clientes():
             .all()
         )
 
-
         content = r"""
 
 <div class="top">
-
 
 <div>
 
@@ -3164,7 +2866,6 @@ def clientes():
 
 </div>
 
-
 <a
     class="btn primary"
     href="{{ url_for('novo_cliente') }}"
@@ -3172,21 +2873,17 @@ def clientes():
     ＋ Novo cliente
 </a>
 
-
 </div>
-
 
 <div
     class="card"
     style="margin-bottom:18px;"
 >
 
-
 <form
     method="get"
     class="toolbar"
 >
-
 
 <div
     style="
@@ -3206,7 +2903,6 @@ def clientes():
 >
 
 </div>
-
 
 <div
     style="
@@ -3229,7 +2925,6 @@ def clientes():
     Todos
 </option>
 
-
 <option
     value="Pago"
     {{ 'selected'
@@ -3237,7 +2932,6 @@ def clientes():
 >
     Pagos
 </option>
-
 
 <option
     value="Pendente"
@@ -3247,11 +2941,9 @@ def clientes():
     Pendentes
 </option>
 
-
 </select>
 
 </div>
-
 
 <div
     style="
@@ -3268,9 +2960,7 @@ def clientes():
 
 </div>
 
-
 </form>
-
 
 <div
     style="
@@ -3289,7 +2979,6 @@ def clientes():
     cliente(s) encontrado(s)
 </span>
 
-
 <a
     href="{{ url_for('importar') }}"
     class="btn secondary"
@@ -3297,112 +2986,17 @@ def clientes():
     📥 Importar CSV
 </a>
 
-
 </div>
 
-
 </div>
-
 
 {% if lista %}
 
-
-<form
-    id="bulk-delete-form"
-    method="post"
-    action="{{ url_for('excluir_selecionados') }}"
-    onsubmit="
-        return confirmarSelecionados();
-    "
->
-</form>
-
-
-<div class="bulk-toolbar">
-
-
-<label class="select-all-label">
-
-<input
-    type="checkbox"
-    id="selecionar-todos"
-    onchange="selecionarTodos(this)"
->
-
-<span>
-    Selecionar todos
-</span>
-
-</label>
-
-
-<div class="bulk-actions">
-
-<span
-    class="bulk-count"
-    id="contador-selecionados"
->
-    0 selecionados
-</span>
-
-
-<button
-    type="submit"
-    form="bulk-delete-form"
-    class="btn danger"
->
-    🗑 Excluir selecionados
-</button>
-
-
-<form
-    method="post"
-    action="{{ url_for('excluir_todos') }}"
-    onsubmit="
-        return confirm(
-            'ATENÇÃO! Isso irá excluir TODOS os clientes do sistema. Esta ação não poderá ser desfeita. Deseja continuar?'
-        );
-    "
->
-
-<button
-    class="btn danger-all"
-    type="submit"
->
-    🗑 Excluir todos
-</button>
-
-</form>
-
-
-</div>
-
-
-</div>
-
-
 {% for c in lista %}
-
 
 <div class="client">
 
-
 <div>
-
-<input
-    type="checkbox"
-    class="select-client"
-    name="cliente_ids"
-    value="{{ c.id }}"
-    form="bulk-delete-form"
-    onchange="atualizarContador()"
->
-
-</div>
-
-
-<div>
-
 
 <div
     class="name
@@ -3415,22 +3009,17 @@ def clientes():
 
 </div>
 
-
 <div class="username">
     {{ c.usuario }}
 </div>
 
-
 <details class="drawer">
-
 
 <summary>
     ▾ Ver detalhes
 </summary>
 
-
 <div class="drawer-content">
-
 
 <div class="detail-box">
 
@@ -3444,7 +3033,6 @@ def clientes():
 
 </div>
 
-
 <div class="detail-box">
 
 <div class="detail-label">
@@ -3456,7 +3044,6 @@ def clientes():
 </div>
 
 </div>
-
 
 <div class="detail-box">
 
@@ -3470,15 +3057,11 @@ def clientes():
 
 </div>
 
-
 </div>
-
 
 </details>
 
-
 </div>
-
 
 <div>
 
@@ -3492,7 +3075,6 @@ def clientes():
 
 </div>
 
-
 <div>
 
 <div class="metric-label">
@@ -3505,9 +3087,7 @@ def clientes():
 
 </div>
 
-
 <div>
-
 
 <span
     class="badge
@@ -3522,12 +3102,9 @@ def clientes():
 
 </span>
 
-
 </div>
 
-
 <div class="actions">
-
 
 <form
     method="post"
@@ -3536,7 +3113,6 @@ def clientes():
         cliente_id=c.id
     ) }}"
 >
-
 
 <button
     class="btn
@@ -3552,9 +3128,7 @@ def clientes():
 
 </button>
 
-
 </form>
-
 
 <a
     class="btn secondary"
@@ -3565,7 +3139,6 @@ def clientes():
 >
     Editar
 </a>
-
 
 <form
     method="post"
@@ -3580,7 +3153,6 @@ def clientes():
     "
 >
 
-
 <button
     class="btn danger"
     type="submit"
@@ -3588,112 +3160,33 @@ def clientes():
     Excluir
 </button>
 
-
 </form>
 
-
 </div>
 
-
 </div>
-
 
 {% endfor %}
 
-
 {% else %}
-
 
 <div class="card empty">
 
-    <div style="font-size:35px;">
-        👥
-    </div>
+<div style="font-size:35px;">
+    👥
+</div>
 
-    <h3>
-        Nenhum cliente encontrado
-    </h3>
+<h3>
+    Nenhum cliente encontrado
+</h3>
 
-    <div>
-        Cadastre um novo cliente ou importe um arquivo CSV.
-    </div>
+<div>
+    Cadastre um novo cliente ou importe um arquivo CSV.
+</div>
 
 </div>
 
-
 {% endif %}
-
-
-<script>
-
-function selecionarTodos(elemento) {
-
-    const caixas = document.querySelectorAll(
-        ".select-client"
-    );
-
-    caixas.forEach(function(caixa) {
-
-        caixa.checked = elemento.checked;
-
-    });
-
-    atualizarContador();
-
-}
-
-
-function atualizarContador() {
-
-    const caixas = document.querySelectorAll(
-        ".select-client:checked"
-    );
-
-    const contador =
-        document.getElementById(
-            "contador-selecionados"
-        );
-
-    if (contador) {
-
-        contador.textContent =
-            caixas.length +
-            (
-                caixas.length === 1
-                ? " selecionado"
-                : " selecionados"
-            );
-
-    }
-
-}
-
-
-function confirmarSelecionados() {
-
-    const caixas = document.querySelectorAll(
-        ".select-client:checked"
-    );
-
-    if (caixas.length === 0) {
-
-        alert(
-            "Selecione pelo menos um cliente para excluir."
-        );
-
-        return false;
-
-    }
-
-    return confirm(
-        "Excluir " +
-        caixas.length +
-        " cliente(s) selecionado(s)? Esta ação não poderá ser desfeita."
-    );
-
-}
-
-</script>
 
 """
 
@@ -3727,7 +3220,6 @@ FORM = r"""
 
 <div class="top">
 
-
 <div>
 
 <h1>
@@ -3735,7 +3227,6 @@ FORM = r"""
        if editar
        else 'Adicionar cliente' }}
 </h1>
-
 
 <div class="subtitle">
 
@@ -3745,9 +3236,7 @@ FORM = r"""
 
 </div>
 
-
 </div>
-
 
 <a
     class="btn secondary"
@@ -3756,25 +3245,19 @@ FORM = r"""
     ← Voltar
 </a>
 
-
 </div>
-
 
 <div class="card">
 
-
 <form method="post">
 
-
 <div class="form-grid">
-
 
 <div>
 
 <label>
     Nome do cliente
 </label>
-
 
 <input
     name="nome"
@@ -3784,16 +3267,13 @@ FORM = r"""
     placeholder="Ex.: João Silva"
 >
 
-
 </div>
-
 
 <div>
 
 <label>
     Nome de usuário
 </label>
-
 
 <input
     name="usuario"
@@ -3803,16 +3283,13 @@ FORM = r"""
     placeholder="Ex.: joao123"
 >
 
-
 </div>
-
 
 <div>
 
 <label>
     Valor da mensalidade
 </label>
-
 
 <input
     type="number"
@@ -3823,16 +3300,13 @@ FORM = r"""
     required
 >
 
-
 </div>
-
 
 <div>
 
 <label>
     Data de vencimento
 </label>
-
 
 <input
     type="date"
@@ -3844,17 +3318,13 @@ FORM = r"""
     }}"
 >
 
-
 </div>
 
-
 </div>
-
 
 <div
     class="actions mt"
 >
-
 
 <button
     class="btn primary"
@@ -3867,7 +3337,6 @@ FORM = r"""
 
 </button>
 
-
 <a
     class="btn secondary"
     href="{{ url_for('clientes') }}"
@@ -3875,15 +3344,11 @@ FORM = r"""
     Cancelar
 </a>
 
-
 </div>
-
 
 </form>
 
-
 </div>
-
 
 """
 
@@ -3938,7 +3403,6 @@ def novo_cliente():
                 else None
             )
 
-
             if not nome or not usuario:
 
                 flash(
@@ -3951,7 +3415,6 @@ def novo_cliente():
                     )
                 )
 
-
             existente = (
                 db.query(Cliente)
                 .filter(
@@ -3960,7 +3423,6 @@ def novo_cliente():
                 )
                 .first()
             )
-
 
             if existente:
 
@@ -3974,7 +3436,6 @@ def novo_cliente():
                     )
                 )
 
-
             cliente = Cliente(
                 nome=nome,
                 usuario=usuario,
@@ -3983,21 +3444,17 @@ def novo_cliente():
                 status="Pendente"
             )
 
-
             db.add(cliente)
 
             db.commit()
-
 
             flash(
                 "Cliente cadastrado com sucesso."
             )
 
-
             return redirect(
                 url_for("clientes")
             )
-
 
         except (
             ValueError,
@@ -4019,7 +3476,6 @@ def novo_cliente():
         finally:
 
             db.close()
-
 
     return page(
         FORM,
@@ -4056,7 +3512,6 @@ def editar_cliente(
             .first()
         )
 
-
         if not cliente:
 
             flash(
@@ -4066,7 +3521,6 @@ def editar_cliente(
             return redirect(
                 url_for("clientes")
             )
-
 
         if request.method == "POST":
 
@@ -4103,7 +3557,6 @@ def editar_cliente(
                 else None
             )
 
-
             if not nome or not usuario:
 
                 flash(
@@ -4117,7 +3570,6 @@ def editar_cliente(
                     )
                 )
 
-
             outro = (
                 db.query(Cliente)
                 .filter(
@@ -4128,7 +3580,6 @@ def editar_cliente(
                 )
                 .first()
             )
-
 
             if outro:
 
@@ -4143,25 +3594,20 @@ def editar_cliente(
                     )
                 )
 
-
             cliente.nome = nome
             cliente.usuario = usuario
             cliente.valor = valor
             cliente.vencimento = vencimento
 
-
             db.commit()
-
 
             flash(
                 "Cliente atualizado com sucesso."
             )
 
-
             return redirect(
                 url_for("clientes")
             )
-
 
         return page(
             FORM,
@@ -4170,7 +3616,6 @@ def editar_cliente(
             c=cliente,
             editar=True
         )
-
 
     except (
         ValueError,
@@ -4193,7 +3638,7 @@ def editar_cliente(
 
 
 # ============================================================
-# ALTERAR STATUS
+# ALTERAR STATUS / CONFIRMAR PAGAMENTO
 # ============================================================
 
 @app.post(
@@ -4217,7 +3662,6 @@ def alternar_status(
             .first()
         )
 
-
         if not cliente:
 
             flash(
@@ -4227,7 +3671,6 @@ def alternar_status(
             return redirect(
                 url_for("clientes")
             )
-
 
         if cliente.status == "Pago":
 
@@ -4241,25 +3684,45 @@ def alternar_status(
 
         else:
 
+            # ==================================================
+            # CONFIRMA PAGAMENTO
+            # ==================================================
+
             cliente.status = "Pago"
 
             cliente.data_pagamento = (
                 datetime.utcnow()
             )
 
+            # ==================================================
+            # ATUALIZA AUTOMATICAMENTE O VENCIMENTO
+            #
+            # Exemplo:
+            # 10/10/2026
+            #       ↓
+            # 11/11/2026
+            #
+            # O sistema avança um mês e acrescenta 1 dia.
+            # ==================================================
+
+            if cliente.vencimento:
+
+                cliente.vencimento = (
+                    calcular_proximo_vencimento(
+                        cliente.vencimento
+                    )
+                )
+
             flash(
-                "Pagamento registrado com sucesso."
+                "Pagamento registrado e vencimento atualizado para o próximo ciclo."
             )
 
-
         db.commit()
-
 
         return redirect(
             request.referrer
             or url_for("clientes")
         )
-
 
     except SQLAlchemyError:
 
@@ -4303,7 +3766,6 @@ def excluir_cliente(
             .first()
         )
 
-
         if cliente:
 
             db.delete(cliente)
@@ -4320,11 +3782,9 @@ def excluir_cliente(
                 "Cliente não encontrado."
             )
 
-
         return redirect(
             url_for("clientes")
         )
-
 
     except SQLAlchemyError:
 
@@ -4332,188 +3792,6 @@ def excluir_cliente(
 
         flash(
             "Não foi possível excluir o cliente."
-        )
-
-        return redirect(
-            url_for("clientes")
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# EXCLUIR CLIENTES SELECIONADOS
-# ============================================================
-
-@app.post(
-    "/clientes/excluir-selecionados"
-)
-@login_required
-def excluir_selecionados():
-
-    db = SessionLocal()
-
-    try:
-
-        ids = request.form.getlist(
-            "cliente_ids"
-        )
-
-        ids_validos = []
-
-        for item in ids:
-
-            try:
-
-                numero = int(item)
-
-                if numero > 0:
-                    ids_validos.append(numero)
-
-            except (
-                ValueError,
-                TypeError
-            ):
-
-                continue
-
-
-        if not ids_validos:
-
-            flash(
-                "Nenhum cliente foi selecionado."
-            )
-
-            return redirect(
-                url_for("clientes")
-            )
-
-
-        clientes = (
-            db.query(Cliente)
-            .filter(
-                Cliente.id.in_(
-                    ids_validos
-                )
-            )
-            .all()
-        )
-
-
-        quantidade = len(
-            clientes
-        )
-
-
-        if quantidade == 0:
-
-            flash(
-                "Nenhum cliente encontrado para excluir."
-            )
-
-            return redirect(
-                url_for("clientes")
-            )
-
-
-        for cliente in clientes:
-
-            db.delete(cliente)
-
-
-        db.commit()
-
-
-        flash(
-            f"{quantidade} cliente(s) excluído(s) com sucesso."
-        )
-
-
-        return redirect(
-            url_for("clientes")
-        )
-
-
-    except SQLAlchemyError:
-
-        db.rollback()
-
-        flash(
-            "Não foi possível excluir os clientes selecionados."
-        )
-
-        return redirect(
-            url_for("clientes")
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# EXCLUIR TODOS OS CLIENTES
-# ============================================================
-
-@app.post(
-    "/clientes/excluir-todos"
-)
-@login_required
-def excluir_todos():
-
-    db = SessionLocal()
-
-    try:
-
-        quantidade = (
-            db.query(
-                func.count(
-                    Cliente.id
-                )
-            ).scalar()
-            or 0
-        )
-
-
-        if quantidade == 0:
-
-            flash(
-                "Não existem clientes cadastrados."
-            )
-
-            return redirect(
-                url_for("clientes")
-            )
-
-
-        db.query(
-            Cliente
-        ).delete(
-            synchronize_session=False
-        )
-
-
-        db.commit()
-
-
-        flash(
-            f"Todos os {quantidade} cliente(s) foram excluídos com sucesso."
-        )
-
-
-        return redirect(
-            url_for("clientes")
-        )
-
-
-    except SQLAlchemyError:
-
-        db.rollback()
-
-        flash(
-            "Não foi possível excluir todos os clientes."
         )
 
         return redirect(
@@ -4542,20 +3820,6 @@ def importar():
             "arquivo"
         )
 
-        modo = request.form.get(
-            "modo",
-            "adicionar"
-        ).strip().lower()
-
-
-        if modo not in (
-            "adicionar",
-            "substituir"
-        ):
-
-            modo = "adicionar"
-
-
         if not arquivo or not arquivo.filename:
 
             flash(
@@ -4566,21 +3830,14 @@ def importar():
                 url_for("importar")
             )
 
-
         db = SessionLocal()
 
         adicionados = 0
         ignorados = 0
 
-
         try:
 
             import pandas as pd
-
-
-            # ------------------------------------------------
-            # LER E VALIDAR O CSV ANTES DE ALTERAR O BANCO
-            # ------------------------------------------------
 
             df = pd.read_csv(
                 arquivo,
@@ -4589,12 +3846,10 @@ def importar():
                 dtype=str
             )
 
-
             colunas = {
                 str(c).strip().lower(): c
                 for c in df.columns
             }
-
 
             if (
                 "nome" not in colunas
@@ -4609,36 +3864,19 @@ def importar():
                     url_for("importar")
                 )
 
-
-            registros = []
-
-            usuarios_csv = set()
-
-
-            # ------------------------------------------------
-            # PREPARAR TODOS OS REGISTROS
-            # ------------------------------------------------
-
             for _, row in df.iterrows():
 
-                nome_bruto = row[
-                    colunas["nome"]
-                ]
-
-                usuario_bruto = row[
-                    colunas["usuario"]
-                ]
-
-
                 nome = str(
-                    nome_bruto
+                    row[
+                        colunas["nome"]
+                    ]
                 ).strip()
-
 
                 usuario = str(
-                    usuario_bruto
+                    row[
+                        colunas["usuario"]
+                    ]
                 ).strip()
-
 
                 if (
                     not nome
@@ -4651,28 +3889,22 @@ def importar():
 
                     continue
 
-
-                usuario_chave = (
-                    usuario.lower()
+                existente = (
+                    db.query(Cliente)
+                    .filter(
+                        Cliente.usuario
+                        == usuario
+                    )
+                    .first()
                 )
 
-
-                # Evita dois usuários iguais
-                # dentro do mesmo CSV
-                if usuario_chave in usuarios_csv:
+                if existente:
 
                     ignorados += 1
 
                     continue
 
-
-                usuarios_csv.add(
-                    usuario_chave
-                )
-
-
                 valor = 0.0
-
 
                 if "valor" in colunas:
 
@@ -4683,7 +3915,6 @@ def importar():
                                 colunas["valor"]
                             ]
                         ).strip()
-
 
                         if (
                             bruto
@@ -4702,7 +3933,6 @@ def importar():
                                     ""
                                 )
                             )
-
 
                             if (
                                 ","
@@ -4730,7 +3960,6 @@ def importar():
                                     "."
                                 )
 
-
                             valor = float(
                                 bruto
                             )
@@ -4742,9 +3971,7 @@ def importar():
 
                         valor = 0.0
 
-
                 vencimento = None
-
 
                 if "vencimento" in colunas:
 
@@ -4755,7 +3982,6 @@ def importar():
                                 "vencimento"
                             ]
                         ]
-
 
                         if (
                             bruto
@@ -4776,128 +4002,19 @@ def importar():
 
                         vencimento = None
 
-
-                registros.append({
-                    "nome": nome,
-                    "usuario": usuario,
-                    "valor": valor,
-                    "vencimento": vencimento
-                })
-
-
-            # ------------------------------------------------
-            # MODO SUBSTITUIR
-            # ------------------------------------------------
-
-            if modo == "substituir":
-
-                # O arquivo foi validado antes daqui.
-                # A exclusão e inserção acontecem
-                # dentro da mesma transação.
-
-                db.query(
-                    Cliente
-                ).delete(
-                    synchronize_session=False
-                )
-
-
-                for registro in registros:
-
-                    db.add(
-                        Cliente(
-                            nome=registro["nome"],
-                            usuario=registro["usuario"],
-                            valor=registro["valor"],
-                            vencimento=registro["vencimento"],
-                            status="Pendente"
-                        )
-                    )
-
-                    adicionados += 1
-
-
-                db.commit()
-
-
-                flash(
-                    f"Lista substituída com sucesso: "
-                    f"{adicionados} cliente(s) cadastrados."
-                )
-
-
-                return redirect(
-                    url_for("clientes")
-                )
-
-
-            # ------------------------------------------------
-            # MODO ADICIONAR
-            # ------------------------------------------------
-
-            usuarios_existentes = set()
-
-
-            if registros:
-
-                usuarios_lista = [
-                    registro["usuario"]
-                    for registro in registros
-                ]
-
-
-                existentes = (
-                    db.query(
-                        Cliente.usuario
-                    )
-                    .filter(
-                        Cliente.usuario.in_(
-                            usuarios_lista
-                        )
-                    )
-                    .all()
-                )
-
-
-                usuarios_existentes = {
-                    str(item[0]).lower()
-                    for item in existentes
-                }
-
-
-            for registro in registros:
-
-                usuario = registro[
-                    "usuario"
-                ]
-
-
-                if (
-                    usuario.lower()
-                    in usuarios_existentes
-                ):
-
-                    ignorados += 1
-
-                    continue
-
-
                 db.add(
                     Cliente(
-                        nome=registro["nome"],
-                        usuario=registro["usuario"],
-                        valor=registro["valor"],
-                        vencimento=registro["vencimento"],
+                        nome=nome,
+                        usuario=usuario,
+                        valor=valor,
+                        vencimento=vencimento,
                         status="Pendente"
                     )
                 )
 
-
                 adicionados += 1
 
-
             db.commit()
-
 
             flash(
                 f"Importação concluída: "
@@ -4905,40 +4022,29 @@ def importar():
                 f"{ignorados} ignorados."
             )
 
-
             return redirect(
                 url_for("clientes")
             )
 
-
-        except Exception as error:
+        except Exception:
 
             db.rollback()
 
-            print(
-                "ERRO NA IMPORTAÇÃO CSV:",
-                repr(error)
-            )
-
             flash(
-                "Não foi possível processar o arquivo CSV. "
-                "Nenhuma alteração foi aplicada."
+                "Não foi possível processar o arquivo CSV."
             )
 
             return redirect(
                 url_for("importar")
             )
 
-
         finally:
 
             db.close()
 
-
     content = r"""
 
 <div class="top">
-
 
 <div>
 
@@ -4947,11 +4053,10 @@ def importar():
 </h1>
 
 <div class="subtitle">
-    Cadastre novos clientes ou substitua toda a lista atual.
+    Cadastre vários clientes de uma única vez.
 </div>
 
 </div>
-
 
 <a
     class="btn secondary"
@@ -4960,36 +4065,28 @@ def importar():
     ← Clientes
 </a>
 
-
 </div>
-
 
 <div class="grid2">
 
-
 <div class="card">
 
-
 <h3>
-    📥 Importar arquivo CSV
+    📥 Arquivo CSV
 </h3>
 
-
 <div class="subtitle">
-    Escolha como deseja importar sua lista.
+    Envie sua lista de clientes.
 </div>
-
 
 <div
     class="detail-box"
     style="margin:18px 0;"
 >
 
-
 <div class="detail-label">
     Colunas obrigatórias
 </div>
-
 
 <div
     class="detail-value"
@@ -5000,7 +4097,6 @@ Nome, Usuario
 
 </div>
 
-
 <div
     class="detail-label"
     style="margin-top:12px;"
@@ -5009,7 +4105,6 @@ Nome, Usuario
 Colunas opcionais
 
 </div>
-
 
 <div
     class="detail-value"
@@ -5020,20 +4115,12 @@ Valor, Vencimento
 
 </div>
 
-
 </div>
-
 
 <form
     method="post"
     enctype="multipart/form-data"
 >
-
-
-<label>
-    Arquivo CSV
-</label>
-
 
 <input
     type="file"
@@ -5042,165 +4129,30 @@ Valor, Vencimento
     required
 >
 
-
-<div
-    style="
-        margin-top:18px;
-        display:grid;
-        gap:10px;
-    "
->
-
-
-<label
-    style="
-        display:flex;
-        align-items:flex-start;
-        gap:10px;
-        padding:14px;
-        border:1px solid #243044;
-        border-radius:12px;
-        background:#0b1220;
-        cursor:pointer;
-        margin:0;
-    "
->
-
-
-<input
-    type="radio"
-    name="modo"
-    value="adicionar"
-    checked
-    style="
-        width:18px;
-        height:18px;
-        margin-top:2px;
-        accent-color:#3b82f6;
-    "
->
-
-
-<div>
-
-<strong>
-    ➕ Adicionar clientes
-</strong>
-
-<div
-    class="subtitle"
-    style="margin-top:4px;"
->
-
-Mantém os clientes atuais e adiciona somente os novos.
-
-</div>
-
-</div>
-
-
-</label>
-
-
-<label
-    style="
-        display:flex;
-        align-items:flex-start;
-        gap:10px;
-        padding:14px;
-        border:1px solid rgba(239,68,68,.30);
-        border-radius:12px;
-        background:rgba(239,68,68,.06);
-        cursor:pointer;
-        margin:0;
-    "
->
-
-
-<input
-    type="radio"
-    name="modo"
-    value="substituir"
-    style="
-        width:18px;
-        height:18px;
-        margin-top:2px;
-        accent-color:#ef4444;
-    "
->
-
-
-<div>
-
-<strong class="red">
-    🔄 Substituir lista atual
-</strong>
-
-<div
-    class="subtitle"
-    style="margin-top:4px;"
->
-
-Apaga os clientes atuais e cadastra somente os clientes deste CSV.
-
-</div>
-
-</div>
-
-
-</label>
-
-
-</div>
-
-
 <button
     class="btn primary full mt"
     type="submit"
-    onclick="
-        const modo = document.querySelector(
-            'input[name=modo]:checked'
-        );
-
-        if (
-            modo &&
-            modo.value === 'substituir'
-        ) {
-            return confirm(
-                'ATENÇÃO! A lista atual será substituída pelos clientes deste CSV. Os clientes que não estiverem no novo arquivo serão removidos. Deseja continuar?'
-            );
-        }
-
-        return true;
-    "
 >
-    📥 Processar arquivo
+    📥 Importar clientes
 </button>
-
 
 </form>
 
-
 </div>
-
 
 <div class="card">
 
-
 <h3>
-    📄 Exemplo do arquivo
+    📄 Exemplo
 </h3>
-
 
 <div class="subtitle">
     Formato recomendado
 </div>
 
-
 <table
     style="margin-top:15px;"
 >
-
 
 <tr>
 
@@ -5222,7 +4174,6 @@ Apaga os clientes atuais e cadastra somente os clientes deste CSV.
 
 </tr>
 
-
 <tr>
 
 <td>
@@ -5242,7 +4193,6 @@ Apaga os clientes atuais e cadastra somente os clientes deste CSV.
 </td>
 
 </tr>
-
 
 <tr>
 
@@ -5264,9 +4214,7 @@ Apaga os clientes atuais e cadastra somente os clientes deste CSV.
 
 </tr>
 
-
 </table>
-
 
 <div
     class="detail-box"
@@ -5274,7 +4222,7 @@ Apaga os clientes atuais e cadastra somente os clientes deste CSV.
 >
 
 <div class="detail-label">
-    ➕ Adicionar
+    Observação
 </div>
 
 <div
@@ -5282,59 +4230,13 @@ Apaga os clientes atuais e cadastra somente os clientes deste CSV.
     style="margin-top:7px;"
 >
 
-Os clientes existentes permanecem no sistema. Usuários que já existem serão ignorados.
-
-</div>
-
-
-<div
-    class="detail-label"
-    style="margin-top:15px;"
->
-
-🔄 Substituir
-</div>
-
-<div
-    class="subtitle"
-    style="margin-top:7px;"
->
-
-A lista atual será removida e o novo CSV passará a ser a nova lista de clientes.
-
-</div>
-
-
-</div>
-
-
-<div
-    class="detail-box"
-    style="
-        margin-top:12px;
-        border:1px solid rgba(239,68,68,.20);
-        background:rgba(239,68,68,.05);
-    "
->
-
-<div class="detail-label red">
-    ⚠️ Atenção
-</div>
-
-<div
-    class="subtitle"
-    style="margin-top:7px;"
->
-
-No modo "Substituir", faça uma confirmação antes de enviar o arquivo. Clientes que não estiverem no novo CSV serão removidos.
+Clientes com o mesmo usuário já existente serão ignorados.
 
 </div>
 
 </div>
 
-
 </div>
-
 
 </div>
 
@@ -5367,14 +4269,12 @@ def health():
             "database": "connected"
         }
 
-
     except Exception as error:
 
         return {
             "status": "error",
             "database": str(error)
         }, 500
-
 
     finally:
 
