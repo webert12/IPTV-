@@ -216,7 +216,6 @@ def formatar_data(valor):
 
 
 # ============================================================
-# NOVA FUNÇÃO:
 # PRÓXIMO VENCIMENTO APÓS PAGAMENTO
 # ============================================================
 
@@ -225,46 +224,22 @@ def calcular_proximo_vencimento(vencimento_atual):
     if not vencimento_atual:
         return None
 
+    # Sempre será o dia 10 do mês seguinte
     ano = vencimento_atual.year
     mes = vencimento_atual.month
-    dia = vencimento_atual.day
 
-    # Avança para o próximo mês
     if mes == 12:
         mes = 1
         ano += 1
     else:
         mes += 1
 
-    # Garante que o dia exista no próximo mês.
-    # Exemplo:
-    # 31/01 -> 28/02 ou 29/02
-    ultimo_dia = calendar.monthrange(
-        ano,
-        mes
-    )[1]
-
-    dia = min(
-        dia,
-        ultimo_dia
-    )
-
-    novo_vencimento = date(
+    # O dia será SEMPRE 10
+    return date(
         ano,
         mes,
-        dia
+        10
     )
-
-    # Regra solicitada:
-    # 10/10/2026 -> 11/11/2026
-    novo_vencimento = (
-        novo_vencimento
-        .fromordinal(
-            novo_vencimento.toordinal() + 1
-        )
-    )
-
-    return novo_vencimento
 
 
 def obter_resumo(db):
@@ -3695,14 +3670,16 @@ def alternar_status(
             )
 
             # ==================================================
-            # ATUALIZA AUTOMATICAMENTE O VENCIMENTO
+            # NOVO VENCIMENTO
             #
-            # Exemplo:
-            # 10/10/2026
-            #       ↓
-            # 11/11/2026
+            # O vencimento passa SEMPRE para o dia 10
+            # do mês seguinte.
             #
-            # O sistema avança um mês e acrescenta 1 dia.
+            # Exemplos:
+            #
+            # 10/10/2026 -> 10/11/2026
+            # 10/11/2026 -> 10/12/2026
+            # 10/12/2026 -> 10/01/2027
             # ==================================================
 
             if cliente.vencimento:
@@ -3714,7 +3691,7 @@ def alternar_status(
                 )
 
             flash(
-                "Pagamento registrado e vencimento atualizado para o próximo ciclo."
+                "Pagamento registrado e vencimento atualizado para o dia 10 do próximo mês."
             )
 
         db.commit()
