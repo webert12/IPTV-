@@ -1,7 +1,4 @@
 import os
-import csv
-import io
-import re
 from datetime import datetime, date
 from functools import wraps
 from collections import defaultdict
@@ -27,7 +24,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
@@ -416,288 +413,6 @@ def obter_clientes_recentes(db):
         .limit(5)
         .all()
     )
-
-
-# ============================================================
-# FUNÇÕES PARA IMPORTAÇÃO
-# ============================================================
-
-def normalizar_coluna(nome):
-
-    if nome is None:
-        return ""
-
-    texto = str(nome).strip().lower()
-
-    substituicoes = {
-        "á": "a",
-        "à": "a",
-        "ã": "a",
-        "â": "a",
-        "ä": "a",
-        "é": "e",
-        "è": "e",
-        "ê": "e",
-        "ë": "e",
-        "í": "i",
-        "ì": "i",
-        "î": "i",
-        "ï": "i",
-        "ó": "o",
-        "ò": "o",
-        "õ": "o",
-        "ô": "o",
-        "ö": "o",
-        "ú": "u",
-        "ù": "u",
-        "û": "u",
-        "ü": "u",
-        "ç": "c",
-    }
-
-    for antigo, novo in substituicoes.items():
-        texto = texto.replace(
-            antigo,
-            novo
-        )
-
-    texto = re.sub(
-        r"[^a-z0-9]+",
-        "",
-        texto
-    )
-
-    return texto
-
-
-def encontrar_coluna(colunas, nomes):
-
-    mapa = {
-        normalizar_coluna(coluna): coluna
-        for coluna in colunas
-    }
-
-    for nome in nomes:
-
-        chave = normalizar_coluna(nome)
-
-        if chave in mapa:
-            return mapa[chave]
-
-    return None
-
-
-def limpar_valor(valor):
-
-    if valor is None:
-        return 0.0
-
-    texto = str(valor).strip()
-
-    if not texto:
-        return 0.0
-
-    if texto.lower() in (
-        "nan",
-        "none",
-        "null",
-        "-"
-    ):
-        return 0.0
-
-    texto = (
-        texto
-        .replace("R$", "")
-        .replace("r$", "")
-        .replace(" ", "")
-    )
-
-    try:
-
-        if "," in texto and "." in texto:
-
-            texto = (
-                texto
-                .replace(".", "")
-                .replace(",", ".")
-            )
-
-        elif "," in texto:
-
-            texto = texto.replace(
-                ",",
-                "."
-            )
-
-        return float(texto)
-
-    except Exception:
-
-        return 0.0
-
-
-def limpar_usuario(valor):
-
-    if valor is None:
-        return ""
-
-    texto = str(valor).strip()
-
-    if texto.lower() in (
-        "nan",
-        "none",
-        "null"
-    ):
-        return ""
-
-    return texto
-
-
-def limpar_nome(valor):
-
-    if valor is None:
-        return ""
-
-    texto = str(valor).strip()
-
-    if texto.lower() in (
-        "nan",
-        "none",
-        "null"
-    ):
-        return ""
-
-    return texto
-
-
-def converter_data(valor):
-
-    if valor is None:
-        return None
-
-    texto = str(valor).strip()
-
-    if not texto:
-        return None
-
-    if texto.lower() in (
-        "nan",
-        "none",
-        "null",
-        "-"
-    ):
-        return None
-
-    formatos = [
-        "%d/%m/%Y",
-        "%d-%m-%Y",
-        "%Y-%m-%d",
-        "%d/%m/%y",
-        "%d-%m-%y",
-    ]
-
-    for formato in formatos:
-
-        try:
-
-            return datetime.strptime(
-                texto,
-                formato
-            ).date()
-
-        except ValueError:
-            pass
-
-    try:
-
-        if re.fullmatch(
-            r"\d{1,2}",
-            texto
-        ):
-
-            dia = int(texto)
-
-            if 1 <= dia <= 31:
-
-                hoje = date.today()
-
-                return date(
-                    hoje.year,
-                    hoje.month,
-                    dia
-                )
-
-    except Exception:
-        pass
-
-    return None
-
-
-def ler_csv_arquivo(arquivo):
-
-    conteudo = arquivo.read()
-
-    if not conteudo:
-        raise ValueError(
-            "O arquivo CSV está vazio."
-        )
-
-    texto = None
-
-    for encoding in (
-        "utf-8-sig",
-        "utf-8",
-        "latin-1",
-        "cp1252",
-    ):
-
-        try:
-
-            texto = conteudo.decode(
-                encoding
-            )
-
-            break
-
-        except UnicodeDecodeError:
-            continue
-
-    if texto is None:
-
-        raise ValueError(
-            "Não foi possível ler a codificação do CSV."
-        )
-
-    primeira_linha = texto.splitlines()[0] if texto.splitlines() else ""
-
-    try:
-
-        dialect = csv.Sniffer().sniff(
-            primeira_linha,
-            delimiters=",;"
-        )
-
-        delimitador = dialect.delimiter
-
-    except Exception:
-
-        if ";" in primeira_linha:
-            delimitador = ";"
-        else:
-            delimitador = ","
-
-    leitor = csv.DictReader(
-        io.StringIO(texto),
-        delimiter=delimitador
-    )
-
-    if not leitor.fieldnames:
-
-        raise ValueError(
-            "O CSV não possui cabeçalho."
-        )
-
-    return leitor.fieldnames, list(leitor)
 
 
 # ============================================================
@@ -1401,7 +1116,7 @@ label {
     display: grid;
 
     grid-template-columns:
-        2fr 1fr 1fr 1fr auto;
+        32px 2fr 1fr 1fr 1fr auto;
 
     gap: 15px;
 
@@ -1430,6 +1145,18 @@ label {
 
     transform:
         translateY(-1px);
+}
+
+
+.select-client {
+
+    width: 18px;
+    height: 18px;
+
+    cursor: pointer;
+
+    accent-color:
+        #3b82f6;
 }
 
 
@@ -1807,6 +1534,101 @@ label {
 }
 
 
+.bulk-toolbar {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    align-items: center;
+
+    gap: 12px;
+
+    flex-wrap: wrap;
+
+    padding: 13px 15px;
+
+    margin-bottom: 14px;
+
+    border:
+        1px solid var(--border);
+
+    border-radius: 13px;
+
+    background:
+        rgba(15,23,42,.75);
+}
+
+
+.select-all-label {
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 9px;
+
+    margin: 0;
+
+    cursor: pointer;
+
+    color: #cbd5e1;
+
+    font-size: 13px;
+}
+
+
+.select-all-label input {
+
+    width: 18px;
+    height: 18px;
+
+    accent-color:
+        #3b82f6;
+
+    cursor: pointer;
+}
+
+
+.bulk-actions {
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 8px;
+
+    flex-wrap: wrap;
+}
+
+
+.bulk-count {
+
+    font-size: 12px;
+
+    color: var(--muted);
+
+    margin-right: 3px;
+}
+
+
+.danger-all {
+
+    background:
+        linear-gradient(
+            135deg,
+            #dc2626,
+            #991b1b
+        );
+
+    color: white;
+
+    border:
+        1px solid
+        rgba(248,113,113,.25);
+}
+
+
 table {
 
     width: 100%;
@@ -1983,7 +1805,7 @@ th {
     .client {
 
         grid-template-columns:
-            1fr 1fr;
+            32px 1fr 1fr;
     }
 
 }
@@ -2089,7 +1911,17 @@ th {
     .client {
 
         grid-template-columns:
-            1fr;
+            28px 1fr;
+    }
+
+
+    .client > div:nth-child(3),
+    .client > div:nth-child(4),
+    .client > div:nth-child(5),
+    .client > div:nth-child(6) {
+
+        grid-column:
+            2;
     }
 
 
@@ -2111,6 +1943,13 @@ th {
 
         gap:
             8px;
+    }
+
+
+    .bulk-toolbar {
+
+        align-items:
+            flex-start;
     }
 
 }
@@ -3468,10 +3307,98 @@ def clientes():
 {% if lista %}
 
 
+<form
+    id="bulk-delete-form"
+    method="post"
+    action="{{ url_for('excluir_selecionados') }}"
+    onsubmit="
+        return confirmarSelecionados();
+    "
+>
+</form>
+
+
+<div class="bulk-toolbar">
+
+
+<label class="select-all-label">
+
+<input
+    type="checkbox"
+    id="selecionar-todos"
+    onchange="selecionarTodos(this)"
+>
+
+<span>
+    Selecionar todos
+</span>
+
+</label>
+
+
+<div class="bulk-actions">
+
+<span
+    class="bulk-count"
+    id="contador-selecionados"
+>
+    0 selecionados
+</span>
+
+
+<button
+    type="submit"
+    form="bulk-delete-form"
+    class="btn danger"
+>
+    🗑 Excluir selecionados
+</button>
+
+
+<form
+    method="post"
+    action="{{ url_for('excluir_todos') }}"
+    onsubmit="
+        return confirm(
+            'ATENÇÃO! Isso irá excluir TODOS os clientes do sistema. Esta ação não poderá ser desfeita. Deseja continuar?'
+        );
+    "
+>
+
+<button
+    class="btn danger-all"
+    type="submit"
+>
+    🗑 Excluir todos
+</button>
+
+</form>
+
+
+</div>
+
+
+</div>
+
+
 {% for c in lista %}
 
 
 <div class="client">
+
+
+<div>
+
+<input
+    type="checkbox"
+    class="select-client"
+    name="cliente_ids"
+    value="{{ c.id }}"
+    form="bulk-delete-form"
+    onchange="atualizarContador()"
+>
+
+</div>
 
 
 <div>
@@ -3695,6 +3622,78 @@ def clientes():
 
 
 {% endif %}
+
+
+<script>
+
+function selecionarTodos(elemento) {
+
+    const caixas = document.querySelectorAll(
+        ".select-client"
+    );
+
+    caixas.forEach(function(caixa) {
+
+        caixa.checked = elemento.checked;
+
+    });
+
+    atualizarContador();
+
+}
+
+
+function atualizarContador() {
+
+    const caixas = document.querySelectorAll(
+        ".select-client:checked"
+    );
+
+    const contador =
+        document.getElementById(
+            "contador-selecionados"
+        );
+
+    if (contador) {
+
+        contador.textContent =
+            caixas.length +
+            (
+                caixas.length === 1
+                ? " selecionado"
+                : " selecionados"
+            );
+
+    }
+
+}
+
+
+function confirmarSelecionados() {
+
+    const caixas = document.querySelectorAll(
+        ".select-client:checked"
+    );
+
+    if (caixas.length === 0) {
+
+        alert(
+            "Selecione pelo menos um cliente para excluir."
+        );
+
+        return false;
+
+    }
+
+    return confirm(
+        "Excluir " +
+        caixas.length +
+        " cliente(s) selecionado(s)? Esta ação não poderá ser desfeita."
+    );
+
+}
+
+</script>
 
 """
 
@@ -4345,6 +4344,188 @@ def excluir_cliente(
 
 
 # ============================================================
+# EXCLUIR CLIENTES SELECIONADOS
+# ============================================================
+
+@app.post(
+    "/clientes/excluir-selecionados"
+)
+@login_required
+def excluir_selecionados():
+
+    db = SessionLocal()
+
+    try:
+
+        ids = request.form.getlist(
+            "cliente_ids"
+        )
+
+        ids_validos = []
+
+        for item in ids:
+
+            try:
+
+                numero = int(item)
+
+                if numero > 0:
+                    ids_validos.append(numero)
+
+            except (
+                ValueError,
+                TypeError
+            ):
+
+                continue
+
+
+        if not ids_validos:
+
+            flash(
+                "Nenhum cliente foi selecionado."
+            )
+
+            return redirect(
+                url_for("clientes")
+            )
+
+
+        clientes = (
+            db.query(Cliente)
+            .filter(
+                Cliente.id.in_(
+                    ids_validos
+                )
+            )
+            .all()
+        )
+
+
+        quantidade = len(
+            clientes
+        )
+
+
+        if quantidade == 0:
+
+            flash(
+                "Nenhum cliente encontrado para excluir."
+            )
+
+            return redirect(
+                url_for("clientes")
+            )
+
+
+        for cliente in clientes:
+
+            db.delete(cliente)
+
+
+        db.commit()
+
+
+        flash(
+            f"{quantidade} cliente(s) excluído(s) com sucesso."
+        )
+
+
+        return redirect(
+            url_for("clientes")
+        )
+
+
+    except SQLAlchemyError:
+
+        db.rollback()
+
+        flash(
+            "Não foi possível excluir os clientes selecionados."
+        )
+
+        return redirect(
+            url_for("clientes")
+        )
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
+# EXCLUIR TODOS OS CLIENTES
+# ============================================================
+
+@app.post(
+    "/clientes/excluir-todos"
+)
+@login_required
+def excluir_todos():
+
+    db = SessionLocal()
+
+    try:
+
+        quantidade = (
+            db.query(
+                func.count(
+                    Cliente.id
+                )
+            ).scalar()
+            or 0
+        )
+
+
+        if quantidade == 0:
+
+            flash(
+                "Não existem clientes cadastrados."
+            )
+
+            return redirect(
+                url_for("clientes")
+            )
+
+
+        db.query(
+            Cliente
+        ).delete(
+            synchronize_session=False
+        )
+
+
+        db.commit()
+
+
+        flash(
+            f"Todos os {quantidade} cliente(s) foram excluídos com sucesso."
+        )
+
+
+        return redirect(
+            url_for("clientes")
+        )
+
+
+    except SQLAlchemyError:
+
+        db.rollback()
+
+        flash(
+            "Não foi possível excluir todos os clientes."
+        )
+
+        return redirect(
+            url_for("clientes")
+        )
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
 # IMPORTAÇÃO CSV
 # ============================================================
 
@@ -4361,6 +4542,20 @@ def importar():
             "arquivo"
         )
 
+        modo = request.form.get(
+            "modo",
+            "adicionar"
+        ).strip().lower()
+
+
+        if modo not in (
+            "adicionar",
+            "substituir"
+        ):
+
+            modo = "adicionar"
+
+
         if not arquivo or not arquivo.filename:
 
             flash(
@@ -4371,275 +4566,374 @@ def importar():
                 url_for("importar")
             )
 
+
         db = SessionLocal()
 
         adicionados = 0
         ignorados = 0
-        erros = 0
 
-        usuarios_csv = set()
 
         try:
 
-            fieldnames, linhas = ler_csv_arquivo(
-                arquivo
+            import pandas as pd
+
+
+            # ------------------------------------------------
+            # LER E VALIDAR O CSV ANTES DE ALTERAR O BANCO
+            # ------------------------------------------------
+
+            df = pd.read_csv(
+                arquivo,
+                sep=None,
+                engine="python",
+                dtype=str
             )
 
-            coluna_nome = encontrar_coluna(
-                fieldnames,
-                [
-                    "nome",
-                    "nome do cliente",
-                    "cliente",
-                    "name"
-                ]
-            )
 
-            coluna_usuario = encontrar_coluna(
-                fieldnames,
-                [
-                    "usuario",
-                    "usuário",
-                    "user",
-                    "username",
-                    "login",
-                    "nome de usuario",
-                    "nome de usuário"
-                ]
-            )
+            colunas = {
+                str(c).strip().lower(): c
+                for c in df.columns
+            }
 
-            coluna_valor = encontrar_coluna(
-                fieldnames,
-                [
-                    "valor",
-                    "preco",
-                    "preço",
-                    "mensalidade",
-                    "valor mensalidade",
-                    "valor mensal"
-                ]
-            )
 
-            coluna_vencimento = encontrar_coluna(
-                fieldnames,
-                [
-                    "vencimento",
-                    "data vencimento",
-                    "data de vencimento",
-                    "venc",
-                    "data"
-                ]
-            )
-
-            if not coluna_nome:
+            if (
+                "nome" not in colunas
+                or "usuario" not in colunas
+            ):
 
                 flash(
-                    "O CSV precisa ter uma coluna Nome."
+                    "O CSV precisa ter as colunas Nome e Usuario."
                 )
 
                 return redirect(
                     url_for("importar")
                 )
 
-            for linha in linhas:
 
-                try:
+            registros = []
 
-                    nome = limpar_nome(
-                        linha.get(
-                            coluna_nome,
-                            ""
-                        )
-                    )
+            usuarios_csv = set()
 
-                    if not nome:
 
-                        ignorados += 1
+            # ------------------------------------------------
+            # PREPARAR TODOS OS REGISTROS
+            # ------------------------------------------------
 
-                        continue
+            for _, row in df.iterrows():
 
-                    # ------------------------------------------------
-                    # USUÁRIO
-                    # ------------------------------------------------
-                    #
-                    # Se existir coluna Usuario, usa ela.
-                    #
-                    # Se não existir, o sistema usa o próprio nome
-                    # como usuário.
-                    #
-                    # Isso permite importar arquivos somente com:
-                    #
-                    # Nome
-                    #
-                    # ou:
-                    #
-                    # Nome,Usuario
-                    #
-                    # ------------------------------------------------
+                nome_bruto = row[
+                    colunas["nome"]
+                ]
 
-                    if coluna_usuario:
+                usuario_bruto = row[
+                    colunas["usuario"]
+                ]
 
-                        usuario = limpar_usuario(
-                            linha.get(
-                                coluna_usuario,
-                                ""
-                            )
-                        )
 
-                    else:
+                nome = str(
+                    nome_bruto
+                ).strip()
 
-                        usuario = nome
 
-                    if not usuario:
+                usuario = str(
+                    usuario_bruto
+                ).strip()
 
-                        usuario = nome
 
-                    # Remove espaços excessivos
-                    usuario = re.sub(
-                        r"\s+",
-                        " ",
-                        usuario
-                    ).strip()
-
-                    if not usuario:
-
-                        ignorados += 1
-
-                        continue
-
-                    usuario_chave = usuario.casefold()
-
-                    # Evita duplicados dentro do próprio CSV
-                    if usuario_chave in usuarios_csv:
-
-                        ignorados += 1
-
-                        continue
-
-                    usuarios_csv.add(
-                        usuario_chave
-                    )
-
-                    # Verifica se já existe no banco
-                    existente = (
-                        db.query(Cliente)
-                        .filter(
-                            func.lower(
-                                Cliente.usuario
-                            )
-                            == usuario.lower()
-                        )
-                        .first()
-                    )
-
-                    if existente:
-
-                        ignorados += 1
-
-                        continue
-
-                    # ------------------------------------------------
-                    # VALOR
-                    # ------------------------------------------------
-
-                    valor = 0.0
-
-                    if coluna_valor:
-
-                        valor = limpar_valor(
-                            linha.get(
-                                coluna_valor,
-                                ""
-                            )
-                        )
-
-                    # ------------------------------------------------
-                    # VENCIMENTO
-                    # ------------------------------------------------
-
-                    vencimento = None
-
-                    if coluna_vencimento:
-
-                        vencimento = converter_data(
-                            linha.get(
-                                coluna_vencimento,
-                                ""
-                            )
-                        )
-
-                    # ------------------------------------------------
-                    # SALVA O CLIENTE
-                    # ------------------------------------------------
-
-                    cliente = Cliente(
-                        nome=nome,
-                        usuario=usuario,
-                        valor=valor,
-                        vencimento=vencimento,
-                        status="Pendente"
-                    )
-
-                    # Savepoint individual.
-                    # Se uma linha der erro, somente ela é
-                    # descartada, sem perder os demais clientes.
-                    with db.begin_nested():
-
-                        db.add(cliente)
-
-                        db.flush()
-
-                    adicionados += 1
-
-                except IntegrityError:
+                if (
+                    not nome
+                    or not usuario
+                    or nome.lower() == "nan"
+                    or usuario.lower() == "nan"
+                ):
 
                     ignorados += 1
 
-                    db.rollback()
+                    continue
 
-                except Exception:
 
-                    erros += 1
+                usuario_chave = (
+                    usuario.lower()
+                )
+
+
+                # Evita dois usuários iguais
+                # dentro do mesmo CSV
+                if usuario_chave in usuarios_csv:
+
+                    ignorados += 1
 
                     continue
 
-            # Commit final dos clientes válidos
-            db.commit()
 
-            mensagem = (
-                f"Importação concluída: "
-                f"{adicionados} cliente(s) adicionado(s), "
-                f"{ignorados} ignorado(s)"
-            )
-
-            if erros:
-
-                mensagem += (
-                    f" e {erros} linha(s) com erro."
+                usuarios_csv.add(
+                    usuario_chave
                 )
 
-            flash(mensagem)
+
+                valor = 0.0
+
+
+                if "valor" in colunas:
+
+                    try:
+
+                        bruto = str(
+                            row[
+                                colunas["valor"]
+                            ]
+                        ).strip()
+
+
+                        if (
+                            bruto
+                            and bruto.lower()
+                            != "nan"
+                        ):
+
+                            bruto = (
+                                bruto
+                                .replace(
+                                    "R$",
+                                    ""
+                                )
+                                .replace(
+                                    " ",
+                                    ""
+                                )
+                            )
+
+
+                            if (
+                                ","
+                                in bruto
+                                and "."
+                                in bruto
+                            ):
+
+                                bruto = (
+                                    bruto
+                                    .replace(
+                                        ".",
+                                        ""
+                                    )
+                                    .replace(
+                                        ",",
+                                        "."
+                                    )
+                                )
+
+                            elif "," in bruto:
+
+                                bruto = bruto.replace(
+                                    ",",
+                                    "."
+                                )
+
+
+                            valor = float(
+                                bruto
+                            )
+
+                    except (
+                        ValueError,
+                        TypeError
+                    ):
+
+                        valor = 0.0
+
+
+                vencimento = None
+
+
+                if "vencimento" in colunas:
+
+                    try:
+
+                        bruto = row[
+                            colunas[
+                                "vencimento"
+                            ]
+                        ]
+
+
+                        if (
+                            bruto
+                            and str(
+                                bruto
+                            ).lower()
+                            != "nan"
+                        ):
+
+                            vencimento = (
+                                pd.to_datetime(
+                                    bruto,
+                                    dayfirst=True
+                                ).date()
+                            )
+
+                    except Exception:
+
+                        vencimento = None
+
+
+                registros.append({
+                    "nome": nome,
+                    "usuario": usuario,
+                    "valor": valor,
+                    "vencimento": vencimento
+                })
+
+
+            # ------------------------------------------------
+            # MODO SUBSTITUIR
+            # ------------------------------------------------
+
+            if modo == "substituir":
+
+                # O arquivo foi validado antes daqui.
+                # A exclusão e inserção acontecem
+                # dentro da mesma transação.
+
+                db.query(
+                    Cliente
+                ).delete(
+                    synchronize_session=False
+                )
+
+
+                for registro in registros:
+
+                    db.add(
+                        Cliente(
+                            nome=registro["nome"],
+                            usuario=registro["usuario"],
+                            valor=registro["valor"],
+                            vencimento=registro["vencimento"],
+                            status="Pendente"
+                        )
+                    )
+
+                    adicionados += 1
+
+
+                db.commit()
+
+
+                flash(
+                    f"Lista substituída com sucesso: "
+                    f"{adicionados} cliente(s) cadastrados."
+                )
+
+
+                return redirect(
+                    url_for("clientes")
+                )
+
+
+            # ------------------------------------------------
+            # MODO ADICIONAR
+            # ------------------------------------------------
+
+            usuarios_existentes = set()
+
+
+            if registros:
+
+                usuarios_lista = [
+                    registro["usuario"]
+                    for registro in registros
+                ]
+
+
+                existentes = (
+                    db.query(
+                        Cliente.usuario
+                    )
+                    .filter(
+                        Cliente.usuario.in_(
+                            usuarios_lista
+                        )
+                    )
+                    .all()
+                )
+
+
+                usuarios_existentes = {
+                    str(item[0]).lower()
+                    for item in existentes
+                }
+
+
+            for registro in registros:
+
+                usuario = registro[
+                    "usuario"
+                ]
+
+
+                if (
+                    usuario.lower()
+                    in usuarios_existentes
+                ):
+
+                    ignorados += 1
+
+                    continue
+
+
+                db.add(
+                    Cliente(
+                        nome=registro["nome"],
+                        usuario=registro["usuario"],
+                        valor=registro["valor"],
+                        vencimento=registro["vencimento"],
+                        status="Pendente"
+                    )
+                )
+
+
+                adicionados += 1
+
+
+            db.commit()
+
+
+            flash(
+                f"Importação concluída: "
+                f"{adicionados} adicionados e "
+                f"{ignorados} ignorados."
+            )
+
 
             return redirect(
                 url_for("clientes")
             )
 
+
         except Exception as error:
 
             db.rollback()
 
+            print(
+                "ERRO NA IMPORTAÇÃO CSV:",
+                repr(error)
+            )
+
             flash(
-                "Não foi possível processar o arquivo CSV: "
-                + str(error)
+                "Não foi possível processar o arquivo CSV. "
+                "Nenhuma alteração foi aplicada."
             )
 
             return redirect(
                 url_for("importar")
             )
 
+
         finally:
 
             db.close()
+
 
     content = r"""
 
@@ -4653,7 +4947,7 @@ def importar():
 </h1>
 
 <div class="subtitle">
-    Cadastre vários clientes de uma única vez.
+    Cadastre novos clientes ou substitua toda a lista atual.
 </div>
 
 </div>
@@ -4677,12 +4971,12 @@ def importar():
 
 
 <h3>
-    📥 Arquivo CSV
+    📥 Importar arquivo CSV
 </h3>
 
 
 <div class="subtitle">
-    Envie sua lista de clientes.
+    Escolha como deseja importar sua lista.
 </div>
 
 
@@ -4693,7 +4987,7 @@ def importar():
 
 
 <div class="detail-label">
-    Formato aceito
+    Colunas obrigatórias
 </div>
 
 
@@ -4702,34 +4996,14 @@ def importar():
     style="margin-top:8px;"
 >
 
-CSV com separador , ou ;
+Nome, Usuario
 
 </div>
 
 
 <div
     class="detail-label"
-    style="margin-top:15px;"
->
-
-Coluna obrigatória
-
-</div>
-
-
-<div
-    class="detail-value"
-    style="margin-top:8px;"
->
-
-Nome
-
-</div>
-
-
-<div
-    class="detail-label"
-    style="margin-top:15px;"
+    style="margin-top:12px;"
 >
 
 Colunas opcionais
@@ -4742,7 +5016,7 @@ Colunas opcionais
     style="margin-top:8px;"
 >
 
-Usuario, Valor, Vencimento
+Valor, Vencimento
 
 </div>
 
@@ -4756,19 +5030,151 @@ Usuario, Valor, Vencimento
 >
 
 
+<label>
+    Arquivo CSV
+</label>
+
+
 <input
     type="file"
     name="arquivo"
-    accept=".csv,text/csv"
+    accept=".csv"
     required
 >
+
+
+<div
+    style="
+        margin-top:18px;
+        display:grid;
+        gap:10px;
+    "
+>
+
+
+<label
+    style="
+        display:flex;
+        align-items:flex-start;
+        gap:10px;
+        padding:14px;
+        border:1px solid #243044;
+        border-radius:12px;
+        background:#0b1220;
+        cursor:pointer;
+        margin:0;
+    "
+>
+
+
+<input
+    type="radio"
+    name="modo"
+    value="adicionar"
+    checked
+    style="
+        width:18px;
+        height:18px;
+        margin-top:2px;
+        accent-color:#3b82f6;
+    "
+>
+
+
+<div>
+
+<strong>
+    ➕ Adicionar clientes
+</strong>
+
+<div
+    class="subtitle"
+    style="margin-top:4px;"
+>
+
+Mantém os clientes atuais e adiciona somente os novos.
+
+</div>
+
+</div>
+
+
+</label>
+
+
+<label
+    style="
+        display:flex;
+        align-items:flex-start;
+        gap:10px;
+        padding:14px;
+        border:1px solid rgba(239,68,68,.30);
+        border-radius:12px;
+        background:rgba(239,68,68,.06);
+        cursor:pointer;
+        margin:0;
+    "
+>
+
+
+<input
+    type="radio"
+    name="modo"
+    value="substituir"
+    style="
+        width:18px;
+        height:18px;
+        margin-top:2px;
+        accent-color:#ef4444;
+    "
+>
+
+
+<div>
+
+<strong class="red">
+    🔄 Substituir lista atual
+</strong>
+
+<div
+    class="subtitle"
+    style="margin-top:4px;"
+>
+
+Apaga os clientes atuais e cadastra somente os clientes deste CSV.
+
+</div>
+
+</div>
+
+
+</label>
+
+
+</div>
 
 
 <button
     class="btn primary full mt"
     type="submit"
+    onclick="
+        const modo = document.querySelector(
+            'input[name=modo]:checked'
+        );
+
+        if (
+            modo &&
+            modo.value === 'substituir'
+        ) {
+            return confirm(
+                'ATENÇÃO! A lista atual será substituída pelos clientes deste CSV. Os clientes que não estiverem no novo arquivo serão removidos. Deseja continuar?'
+            );
+        }
+
+        return true;
+    "
 >
-    📥 Importar clientes
+    📥 Processar arquivo
 </button>
 
 
@@ -4782,104 +5188,147 @@ Usuario, Valor, Vencimento
 
 
 <h3>
-    📄 Exemplos
+    📄 Exemplo do arquivo
 </h3>
 
 
 <div class="subtitle">
-    Você pode usar qualquer um destes formatos.
+    Formato recomendado
 </div>
 
 
-<div
-    class="detail-box"
+<table
     style="margin-top:15px;"
 >
 
 
-<div class="detail-label">
-    Formato completo
-</div>
+<tr>
+
+<th>
+    Nome
+</th>
+
+<th>
+    Usuario
+</th>
+
+<th>
+    Valor
+</th>
+
+<th>
+    Vencimento
+</th>
+
+</tr>
 
 
-<div
-    class="detail-value"
-    style="
-        margin-top:8px;
-        font-family:monospace;
-        line-height:1.8;
-    "
->
+<tr>
 
-Nome;Usuario;Valor;Vencimento<br>
-João Silva;joao123;25;10/10/2026<br>
-Maria Souza;maria456;25;10/10/2026
+<td>
+    João Silva
+</td>
 
-</div>
+<td>
+    joao123
+</td>
+
+<td>
+    25
+</td>
+
+<td>
+    10/10/2026
+</td>
+
+</tr>
 
 
-</div>
+<tr>
+
+<td>
+    Maria Souza
+</td>
+
+<td>
+    maria456
+</td>
+
+<td>
+    40
+</td>
+
+<td>
+    15/10/2026
+</td>
+
+</tr>
+
+
+</table>
 
 
 <div
     class="detail-box"
-    style="margin-top:15px;"
+    style="margin-top:18px;"
 >
-
 
 <div class="detail-label">
-    Somente nomes
+    ➕ Adicionar
 </div>
-
-
-<div
-    class="detail-value"
-    style="
-        margin-top:8px;
-        font-family:monospace;
-        line-height:1.8;
-    "
->
-
-Nome<br>
-João Silva<br>
-Maria Souza<br>
-Carlos Santos
-
-</div>
-
-
-</div>
-
-
-<div
-    class="detail-box"
-    style="margin-top:15px;"
->
-
-
-<div class="detail-label">
-    Importante
-</div>
-
 
 <div
     class="subtitle"
     style="margin-top:7px;"
 >
 
-Se o arquivo tiver somente a coluna Nome,
-o sistema automaticamente utilizará o nome
-como nome de usuário.
-
-Clientes que já existem no banco não serão
-duplicados.
-
-Uma linha com problema não cancela os demais
-clientes válidos.
+Os clientes existentes permanecem no sistema. Usuários que já existem serão ignorados.
 
 </div>
 
+
+<div
+    class="detail-label"
+    style="margin-top:15px;"
+>
+
+🔄 Substituir
+</div>
+
+<div
+    class="subtitle"
+    style="margin-top:7px;"
+>
+
+A lista atual será removida e o novo CSV passará a ser a nova lista de clientes.
+
+</div>
+
+
+</div>
+
+
+<div
+    class="detail-box"
+    style="
+        margin-top:12px;
+        border:1px solid rgba(239,68,68,.20);
+        background:rgba(239,68,68,.05);
+    "
+>
+
+<div class="detail-label red">
+    ⚠️ Atenção
+</div>
+
+<div
+    class="subtitle"
+    style="margin-top:7px;"
+>
+
+No modo "Substituir", faça uma confirmação antes de enviar o arquivo. Clientes que não estiverem no novo CSV serão removidos.
+
+</div>
 
 </div>
 
@@ -4918,12 +5367,14 @@ def health():
             "database": "connected"
         }
 
+
     except Exception as error:
 
         return {
             "status": "error",
             "database": str(error)
         }, 500
+
 
     finally:
 
