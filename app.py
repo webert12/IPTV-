@@ -1,15 +1,14 @@
 import os
+import json
+import uuid
 import base64
-import secrets
 import hashlib
-import calendar
-from decimal import Decimal, InvalidOperation
-from datetime import datetime, date, timedelta
+import secrets
+from datetime import datetime, date, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from functools import wraps
-from collections import defaultdict
 
 import requests
-
 from flask import (
     Flask,
     request,
@@ -17,11 +16,10 @@ from flask import (
     url_for,
     session,
     render_template_string,
-    flash,
     jsonify,
-    Response,
+    flash,
 )
-
+from werkzeug.middleware.proxy_fix import ProxyFix
 from sqlalchemy import (
     create_engine,
     Column,
@@ -31,17 +29,13 @@ from sqlalchemy import (
     Date,
     DateTime,
     Text,
-    Boolean,
+    UniqueConstraint,
     func,
-    text,
 )
-
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
-
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.exceptions import InvalidSignature
 
 
 # ============================================================
@@ -49,5886 +43,1472 @@ from cryptography.exceptions import InvalidSignature
 # ============================================================
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-app.secret_key = os.getenv(
-    "SECRET_KEY",
-    "change-this-secret-key"
+APP_PUBLIC_URL = os.getenv("APP_PUBLIC_URL", "").strip().rstrip("/")
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DB_URL", "")
+SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
+ADMIN_USER = os.getenv("ADMIN_USER", "admin").strip()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+
+PAGBANK_TOKEN = os.getenv("PAGBANK_TOKEN", "").strip()
+PAGBANK_ENV = os.getenv("PAGBANK_ENV", "production").strip().lower()
+PAGBANK_TIMEOUT = int(os.getenv("PAGBANK_TIMEOUT", "25"))
+
+PAGBANK_BASE_URL = (
+    "https://api.pagseguro.com"
+    if PAGBANK_ENV == "production"
+    else "https://sandbox.api.pagseguro.com"
 )
 
-DATABASE_URL = (
-    os.getenv("DATABASE_URL")
-    or os.getenv("DB_URL")
+if not SECRET_KEY:
+    SECRET_KEY = secrets.token_urlsafe(48)
+
+app.secret_key = SECRET_KEY
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=APP_PUBLIC_URL.startswith("https://"),
+    MAX_CONTENT_LENGTH=2 * 1024 * 1024,
 )
-
-if not DATABASE_URL:
-    raise RuntimeError(
-        "DATABASE_URL não configurada no Render."
-    )
-
 
 if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace(
-        "postgres://",
-        "postgresql+psycopg://",
-        1
-    )
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-elif DATABASE_URL.startswith("postgresql://"):
-    DATABASE_URL = DATABASE_URL.replace(
-        "postgresql://",
-        "postgresql+psycopg://",
-        1
-    )
+if DATABASE_URL.startswith("postgresql://") and "+psycopg" not in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL/DB_URL não configurada.")
 
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     pool_recycle=300,
-    pool_size=5,
-    max_overflow=5,
+    pool_size=3,
+    max_overflow=2,
 )
-
 
 Base = declarative_base()
-
-SessionLocal = sessionmaker(
-    bind=engine,
-    autoflush=False,
-    autocommit=False
-)
-
-
-ADMIN_USER = os.getenv(
-    "ADMIN_USER",
-    "admin"
-)
-
-ADMIN_PASSWORD = os.getenv(
-    "ADMIN_PASSWORD",
-    "admin123"
-)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
 # ============================================================
-# PAGBANK
-# ============================================================
-
-PAGBANK_TOKEN = os.getenv(
-    "PAGBANK_TOKEN",
-    ""
-).strip()
-
-PAGBANK_ENV = os.getenv(
-    "PAGBANK_ENV",
-    "sandbox"
-).strip().lower()
-
-APP_PUBLIC_URL = os.getenv(
-    "APP_PUBLIC_URL",
-    ""
-).strip().rstrip("/")
-
-
-if PAGBANK_ENV == "production":
-
-    PAGBANK_API = (
-        "https://api.pagseguro.com"
-    )
-
-else:
-
-    PAGBANK_API = (
-        "https://sandbox.api.pagseguro.com"
-    )
-
-
-PAGBANK_TIMEOUT = 25
-
-
-# ============================================================
-# MODELO CLIENTE
+# MODELOS
+# Usa a tabela clientes que já existe no seu sistema.
 # ============================================================
 
 class Cliente(Base):
-
     __tablename__ = "clientes"
 
-    id = Column(
-        Integer,
-        primary_key=True
-    )
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String(150), nullable=False)
+    usuario = Column(String(150), nullable=False, unique=True, index=True)
+    valor = Column(Float, nullable=False, default=0.0)
+    vencimento = Column(Date, nullable=True)
+    status = Column(String(20), nullable=False, default="Pendente")
+    data_pagamento = Column(DateTime, nullable=True)
+    criado_em = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    nome = Column(
-        String(150),
-        nullable=False
-    )
-
-    usuario = Column(
-        String(150),
-        nullable=False,
-        unique=True,
-        index=True
-    )
-
-    valor = Column(
-        Float,
-        nullable=False,
-        default=0.0
-    )
-
-    vencimento = Column(
-        Date,
-        nullable=True
-    )
-
-    status = Column(
-        String(20),
-        nullable=False,
-        default="Pendente",
-        index=True
-    )
-
-    data_pagamento = Column(
-        DateTime,
-        nullable=True
-    )
-
-    criado_em = Column(
-        DateTime,
-        nullable=False,
-        default=datetime.utcnow
-    )
-
-
-# ============================================================
-# NOVO MODELO - PAGAMENTOS
-# ============================================================
 
 class Pagamento(Base):
-
     __tablename__ = "pagamentos"
 
-    id = Column(
-        Integer,
-        primary_key=True
-    )
+    id = Column(Integer, primary_key=True)
+    referencia = Column(String(80), nullable=False, unique=True, index=True)
+    cliente_id = Column(Integer, nullable=True, index=True)
+    nome_cliente = Column(String(150), nullable=True)
+    usuario_cliente = Column(String(150), nullable=True)
 
-    referencia = Column(
-        String(80),
-        nullable=False,
-        unique=True,
-        index=True
-    )
+    valor = Column(Float, nullable=False)
+    valor_centavos = Column(Integer, nullable=False)
 
-    cliente_id = Column(
-        Integer,
-        nullable=True,
-        index=True
-    )
+    status = Column(String(40), nullable=False, default="AGUARDANDO", index=True)
+    metodo = Column(String(20), nullable=False, default="PIX")
 
-    cliente_nome = Column(
-        String(150),
-        nullable=True
-    )
+    pagbank_order_id = Column(String(100), nullable=True, unique=True, index=True)
+    pagbank_charge_id = Column(String(100), nullable=True, index=True)
 
-    cliente_usuario = Column(
-        String(150),
-        nullable=True,
-        index=True
-    )
+    qr_code_text = Column(Text, nullable=True)
+    qr_code_url = Column(Text, nullable=True)
 
-    valor = Column(
-        Float,
-        nullable=False,
-        default=0.0
-    )
+    criado_em = Column(DateTime, nullable=False, default=datetime.utcnow)
+    pago_em = Column(DateTime, nullable=True)
+    vencimento_gerado = Column(Date, nullable=True)
+    webhook_recebido_em = Column(DateTime, nullable=True)
 
-    status = Column(
-        String(30),
-        nullable=False,
-        default="AGUARDANDO",
-        index=True
-    )
-
-    pagbank_order_id = Column(
-        String(100),
-        nullable=True,
-        unique=True,
-        index=True
-    )
-
-    pagbank_charge_id = Column(
-        String(100),
-        nullable=True,
-        index=True
-    )
-
-    qr_code = Column(
-        Text,
-        nullable=True
-    )
-
-    qr_code_url = Column(
-        Text,
-        nullable=True
-    )
-
-    criado_em = Column(
-        DateTime,
-        nullable=False,
-        default=datetime.utcnow
-    )
-
-    pago_em = Column(
-        DateTime,
-        nullable=True
-    )
-
-    vencimento_apos_pagamento = Column(
-        Date,
-        nullable=True
-    )
-
-    webhook_recebido_em = Column(
-        DateTime,
-        nullable=True
-    )
-
-    observacao = Column(
-        Text,
-        nullable=True
-    )
+    observacao = Column(Text, nullable=True)
+    idempotency_key = Column(String(100), nullable=True, unique=True)
 
 
-# ============================================================
-# MODELO - EVENTOS WEBHOOK
-# ============================================================
+class WebhookEvento(Base):
+    __tablename__ = "pagbank_webhook_eventos"
 
-class WebhookEvent(Base):
-
-    __tablename__ = "webhook_events"
-
-    id = Column(
-        Integer,
-        primary_key=True
-    )
-
-    evento_hash = Column(
-        String(128),
-        nullable=False,
-        unique=True,
-        index=True
-    )
-
-    order_id = Column(
-        String(100),
-        nullable=True,
-        index=True
-    )
-
-    charge_id = Column(
-        String(100),
-        nullable=True,
-        index=True
-    )
-
-    recebido_em = Column(
-        DateTime,
-        nullable=False,
-        default=datetime.utcnow
-    )
-
-    processado_em = Column(
-        DateTime,
-        nullable=True
-    )
-
-    sucesso = Column(
-        Boolean,
-        nullable=False,
-        default=False
-    )
-
-    mensagem = Column(
-        Text,
-        nullable=True
-    )
+    id = Column(Integer, primary_key=True)
+    evento_id = Column(String(180), nullable=True, unique=True, index=True)
+    order_id = Column(String(100), nullable=True, index=True)
+    charge_id = Column(String(100), nullable=True, index=True)
+    payload_hash = Column(String(64), nullable=False, unique=True, index=True)
+    recebido_em = Column(DateTime, nullable=False, default=datetime.utcnow)
+    processado_em = Column(DateTime, nullable=True)
+    status = Column(String(30), nullable=False, default="RECEBIDO")
+    detalhe = Column(Text, nullable=True)
 
 
-# ============================================================
-# CHAVE PÚBLICA DO WEBHOOK
-# ============================================================
-
-class PagBankConfig(Base):
-
+class SistemaConfig(Base):
     __tablename__ = "pagbank_config"
 
-    id = Column(
-        Integer,
-        primary_key=True
-    )
-
-    webhook_public_key = Column(
-        Text,
-        nullable=True
-    )
-
-    atualizado_em = Column(
-        DateTime,
-        nullable=True
-    )
+    id = Column(Integer, primary_key=True)
+    chave = Column(String(100), nullable=False, unique=True)
+    valor = Column(Text, nullable=False)
+    atualizado_em = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
-Base.metadata.create_all(
-    bind=engine
-)
+Base.metadata.create_all(bind=engine)
 
 
 # ============================================================
-# AUTENTICAÇÃO
+# HELPERS
 # ============================================================
 
-def login_required(view):
+def agora_utc():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
-    @wraps(view)
-    def wrapped(*args, **kwargs):
-
-        if not session.get("logged_in"):
-
-            return redirect(
-                url_for("login")
-            )
-
-        return view(
-            *args,
-            **kwargs
-        )
-
-    return wrapped
-
-
-# ============================================================
-# FUNÇÕES AUXILIARES
-# ============================================================
 
 def dinheiro(valor):
-
-    try:
-
-        numero = float(
-            valor or 0
-        )
-
-    except Exception:
-
-        numero = 0.0
-
     return (
-        f"R$ {numero:,.2f}"
+        f"R$ {float(valor):,.2f}"
         .replace(",", "X")
         .replace(".", ",")
         .replace("X", ".")
     )
 
 
-def formatar_data(valor):
+def parse_centavos(valor_bruto):
+    texto = str(valor_bruto or "").strip()
+    texto = texto.replace("R$", "").replace(" ", "")
 
-    if not valor:
+    if not texto:
+        raise ValueError("Informe o valor.")
 
-        return "-"
-
-    if isinstance(valor, datetime):
-
-        return valor.strftime(
-            "%d/%m/%Y"
-        )
-
-    if isinstance(valor, date):
-
-        return valor.strftime(
-            "%d/%m/%Y"
-        )
-
-    return str(valor)
-
-
-def valor_centavos(valor):
-
-    try:
-
-        numero = Decimal(
-            str(valor).replace(
-                ",",
-                "."
-            )
-        )
-
-        if numero <= 0:
-
-            return None
-
-        return int(
-            numero.quantize(
-                Decimal("0.01")
-            ) * 100
-        )
-
-    except (
-        InvalidOperation,
-        ValueError,
-        TypeError
-    ):
-
-        return None
-
-
-def valor_float(valor):
-
-    cents = valor_centavos(
-        valor
-    )
-
-    if cents is None:
-
-        return None
-
-    return cents / 100
-
-
-def proximo_dia_10():
-
-    hoje = date.today()
-
-    ano = hoje.year
-    mes = hoje.month + 1
-
-    if mes == 13:
-
-        mes = 1
-        ano += 1
-
-    return date(
-        ano,
-        mes,
-        10
-    )
-
-
-# ============================================================
-# PRÓXIMO VENCIMENTO APÓS PAGAMENTO
-# ============================================================
-
-def calcular_proximo_vencimento(
-    vencimento_atual
-):
-
-    if not vencimento_atual:
-
-        return proximo_dia_10()
-
-    ano = vencimento_atual.year
-    mes = vencimento_atual.month
-
-    if mes == 12:
-
-        mes = 1
-        ano += 1
-
+    # Aceita:
+    # 25
+    # 25,00
+    # 25.00
+    # 1.234,56
+    # 1,234.56
+    if "," in texto and "." in texto:
+        if texto.rfind(",") > texto.rfind("."):
+            texto = texto.replace(".", "").replace(",", ".")
+        else:
+            texto = texto.replace(",", "")
+    elif "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
     else:
-
-        mes += 1
-
-    return date(
-        ano,
-        mes,
-        10
-    )
-
-
-# ============================================================
-# PAGBANK - HEADERS
-# ============================================================
-
-def pagbank_headers():
-
-    if not PAGBANK_TOKEN:
-
-        raise RuntimeError(
-            "PAGBANK_TOKEN não configurado."
-        )
-
-    return {
-        "Authorization":
-            f"Bearer {PAGBANK_TOKEN}",
-
-        "Accept":
-            "application/json",
-
-        "Content-Type":
-            "application/json"
-    }
-
-
-# ============================================================
-# PAGBANK - CHAVE PÚBLICA
-# ============================================================
-
-def obter_chave_publica_pagbank(
-    db
-):
-
-    config = (
-        db.query(
-            PagBankConfig
-        )
-        .first()
-    )
-
-    if (
-        config
-        and config.webhook_public_key
-    ):
-
-        return (
-            config.webhook_public_key
-        )
-
-    resposta = requests.get(
-        PAGBANK_API
-        + "/public-keys?type=webhook",
-        headers={
-            "Authorization":
-                f"Bearer {PAGBANK_TOKEN}",
-
-            "Accept":
-                "application/json"
-        },
-        timeout=PAGBANK_TIMEOUT
-    )
-
-    if resposta.status_code != 200:
-
-        raise RuntimeError(
-            "Não foi possível obter "
-            "a chave pública do PagBank: "
-            + resposta.text[:500]
-        )
-
-    dados = resposta.json()
-
-    chave = (
-        dados.get(
-            "public_key"
-        )
-    )
-
-    if not chave:
-
-        raise RuntimeError(
-            "PagBank não retornou "
-            "a chave pública."
-        )
-
-    if not config:
-
-        config = PagBankConfig()
-
-        db.add(config)
-
-    config.webhook_public_key = chave
-    config.atualizado_em = datetime.utcnow()
-
-    db.commit()
-
-    return chave
-
-
-# ============================================================
-# PAGBANK - VALIDAR WEBHOOK
-# ============================================================
-
-def validar_webhook_pagbank(
-    corpo_bruto,
-    assinatura_header,
-    chave_publica
-):
-
-    if not assinatura_header:
-
-        return False
-
-    if not chave_publica:
-
-        return False
-
-    assinaturas = [
-        item.strip()
-        for item in
-        assinatura_header.split(",")
-        if item.strip()
-    ]
-
-    if not assinaturas:
-
-        return False
+        # 25.00 continua como decimal.
+        pass
 
     try:
+        valor = Decimal(texto).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        raise ValueError("Valor inválido.")
 
-        chave_bytes = base64.b64decode(
-            chave_publica
-        )
+    centavos = int(valor * 100)
 
-        public_key = (
-            serialization
-            .load_der_public_key(
-                chave_bytes
-            )
-        )
+    if centavos < 100:
+        raise ValueError("O valor mínimo é R$ 1,00.")
 
-    except Exception:
+    if centavos > 5000000:
+        raise ValueError("O valor máximo permitido é R$ 50.000,00.")
 
-        return False
-
-    for assinatura in assinaturas:
-
-        try:
-
-            assinatura_bytes = (
-                base64.b64decode(
-                    assinatura
-                )
-            )
-
-            public_key.verify(
-                assinatura_bytes,
-                corpo_bruto,
-                ec.ECDSA(
-                    hashes.SHA256()
-                )
-            )
-
-            return True
-
-        except (
-            InvalidSignature,
-            ValueError,
-            TypeError
-        ):
-
-            continue
-
-        except Exception:
-
-            continue
-
-    return False
+    return centavos
 
 
-# ============================================================
-# PAGBANK - CONSULTAR PEDIDO
-# ============================================================
-
-def consultar_pedido_pagbank(
-    order_id
-):
-
-    resposta = requests.get(
-        PAGBANK_API
-        + "/orders/"
-        + str(order_id),
-
-        headers=pagbank_headers(),
-
-        timeout=PAGBANK_TIMEOUT
-    )
-
-    if resposta.status_code != 200:
-
-        raise RuntimeError(
-            "Não foi possível consultar "
-            "o pedido PagBank: "
-            + resposta.text[:500]
-        )
-
-    return resposta.json()
+def proximo_vencimento():
+    hoje = date.today()
+    if hoje.month == 12:
+        return date(hoje.year + 1, 1, 10)
+    return date(hoje.year, hoje.month + 1, 10)
 
 
-# ============================================================
-# PAGBANK - CRIAR PIX
-# ============================================================
+def csrf_token():
+    if "csrf_pagamento" not in session:
+        session["csrf_pagamento"] = secrets.token_urlsafe(32)
+    return session["csrf_pagamento"]
 
-def criar_pix_pagbank(
-    pagamento
-):
 
+def validar_csrf(token):
+    esperado = session.get("csrf_pagamento")
+    return bool(esperado and token and secrets.compare_digest(esperado, token))
+
+
+def public_url(path=""):
     if not APP_PUBLIC_URL:
+        raise RuntimeError("APP_PUBLIC_URL não configurada.")
+    return APP_PUBLIC_URL + "/" + path.lstrip("/")
 
+
+def pagbank_headers(idempotency_key=None):
+    headers = {
+        "Authorization": f"Bearer {PAGBANK_TOKEN}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    if idempotency_key:
+        headers["x-idempotency-key"] = idempotency_key
+    return headers
+
+
+def json_response_error(response):
+    try:
+        data = response.json()
+    except Exception:
+        data = {"message": response.text[:500]}
+    return data
+
+
+def obter_config(chave):
+    db = SessionLocal()
+    try:
+        item = db.query(SistemaConfig).filter(SistemaConfig.chave == chave).first()
+        return item.valor if item else None
+    finally:
+        db.close()
+
+
+def salvar_config(chave, valor):
+    db = SessionLocal()
+    try:
+        item = db.query(SistemaConfig).filter(SistemaConfig.chave == chave).first()
+        if item:
+            item.valor = valor
+            item.atualizado_em = agora_utc()
+        else:
+            db.add(SistemaConfig(
+                chave=chave,
+                valor=valor,
+                atualizado_em=agora_utc(),
+            ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+# ============================================================
+# PAGBANK
+# ============================================================
+
+def criar_pedido_pix(pagamento):
+    if not PAGBANK_TOKEN:
+        raise RuntimeError("PAGBANK_TOKEN não configurado.")
+
+    if not APP_PUBLIC_URL.startswith("https://"):
         raise RuntimeError(
-            "APP_PUBLIC_URL não configurada."
+            "APP_PUBLIC_URL precisa usar HTTPS para receber o webhook."
         )
 
-    referencia = (
-        pagamento.referencia
-    )
-
-    centavos = valor_centavos(
-        pagamento.valor
-    )
-
-    if centavos is None:
-
-        raise RuntimeError(
-            "Valor inválido."
-        )
-
-    expiration = (
-        datetime.utcnow()
-        + timedelta(minutes=30)
-    )
-
-    expiration_text = (
-        expiration.strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-    )
+    expiracao = datetime.now(timezone.utc) + timedelta(minutes=30)
 
     payload = {
-
-        "reference_id":
-            referencia,
-
+        "reference_id": pagamento.referencia,
         "items": [
-
             {
-                "reference_id":
-                    referencia,
-
-                "name":
-                    "Mensalidade IPTV",
-
-                "quantity":
-                    1,
-
-                "unit_amount":
-                    centavos
+                "reference_id": pagamento.referencia,
+                "name": "Renovação IPTV",
+                "quantity": 1,
+                "unit_amount": pagamento.valor_centavos,
             }
-
         ],
-
         "notification_urls": [
-
-            APP_PUBLIC_URL
-            + "/webhooks/pagbank"
-
+            public_url("/webhook/pagbank")
         ],
-
         "charges": [
-
             {
-
-                "reference_id":
-                    referencia,
-
-                "description":
-                    "Pagamento de mensalidade IPTV",
-
+                "reference_id": pagamento.referencia,
+                "description": "Renovação IPTV",
                 "amount": {
-
-                    "value":
-                        centavos,
-
-                    "currency":
-                        "BRL"
-
+                    "value": pagamento.valor_centavos,
+                    "currency": "BRL",
                 },
-
                 "payment_method": {
-
-                    "type":
-                        "PIX",
-
+                    "type": "PIX",
                     "pix": {
-
-                        "expiration_date":
-                            expiration_text
-
-                    }
-
-                }
-
+                        "expiration_date": expiracao.isoformat().replace("+00:00", "Z")
+                    },
+                },
             }
-
-        ]
-
+        ],
     }
 
     resposta = requests.post(
-        PAGBANK_API
-        + "/orders",
-
-        headers=pagbank_headers(),
-
+        f"{PAGBANK_BASE_URL}/orders",
+        headers=pagbank_headers(pagamento.idempotency_key),
         json=payload,
-
-        timeout=PAGBANK_TIMEOUT
+        timeout=PAGBANK_TIMEOUT,
     )
 
-    if resposta.status_code not in (
-        200,
-        201
-    ):
-
+    if resposta.status_code not in (200, 201):
+        erro = json_response_error(resposta)
         raise RuntimeError(
-            "Erro ao criar Pix no PagBank: "
-            + resposta.text[:1000]
+            f"PagBank recusou a criação do PIX ({resposta.status_code}): "
+            f"{json.dumps(erro, ensure_ascii=False)[:800]}"
         )
 
     dados = resposta.json()
-
-    charges = (
-        dados.get(
-            "charges"
-        )
-        or []
-    )
+    charges = dados.get("charges") or []
 
     if not charges:
-
-        raise RuntimeError(
-            "PagBank não retornou a cobrança."
-        )
+        raise RuntimeError("PagBank não retornou a cobrança PIX.")
 
     charge = charges[0]
+    qr_code = charge.get("qr_code") or {}
 
-    qr = (
-        charge.get(
-            "qr_code"
-        )
-        or {}
-    )
+    pagamento.pagbank_order_id = dados.get("id")
+    pagamento.pagbank_charge_id = charge.get("id")
+    pagamento.qr_code_text = qr_code.get("text")
+    pagamento.status = charge.get("status") or "WAITING"
 
-    pagamento.pagbank_order_id = (
-        dados.get("id")
-    )
-
-    pagamento.pagbank_charge_id = (
-        charge.get("id")
-    )
-
-    pagamento.qr_code = (
-        qr.get("text")
-    )
-
-    links = (
-        charge.get("links")
-        or []
-    )
-
-    qr_url = None
-
+    links = charge.get("links") or []
     for link in links:
-
-        if link.get(
-            "rel"
-        ) == "QRCODE.PNG":
-
-            qr_url = link.get(
-                "href"
-            )
-
+        if link.get("rel") == "QRCODE.PNG":
+            pagamento.qr_code_url = link.get("href")
             break
 
-    pagamento.qr_code_url = qr_url
+    if not pagamento.qr_code_text:
+        raise RuntimeError("PagBank não retornou o Pix copia e cola.")
 
-    pagamento.status = (
-        "AGUARDANDO"
-    )
+    db = SessionLocal()
+    try:
+        registro = db.query(Pagamento).filter(Pagamento.id == pagamento.id).first()
+        if not registro:
+            raise RuntimeError("Pagamento não encontrado.")
+
+        registro.pagbank_order_id = pagamento.pagbank_order_id
+        registro.pagbank_charge_id = pagamento.pagbank_charge_id
+        registro.qr_code_text = pagamento.qr_code_text
+        registro.qr_code_url = pagamento.qr_code_url
+        registro.status = pagamento.status
+        db.commit()
+    finally:
+        db.close()
 
     return dados
 
 
-# ============================================================
-# RESUMO
-# ============================================================
+def consultar_pedido(order_id):
+    resposta = requests.get(
+        f"{PAGBANK_BASE_URL}/orders/{order_id}",
+        headers=pagbank_headers(),
+        timeout=PAGBANK_TIMEOUT,
+    )
 
-def obter_resumo(db):
+    if resposta.status_code != 200:
+        return None
 
-    total = (
-        db.query(
-            func.count(
-                Cliente.id
+    return resposta.json()
+
+
+def obter_public_key_webhook(forcar=False):
+    """Obtém e mantém em cache a chave pública usada pelo PagBank para webhooks.
+    Se forcar=True, busca uma chave nova no PagBank (útil em caso de rotação da chave).
+    """
+    chave_env = os.getenv("PAGBANK_WEBHOOK_PUBLIC_KEY", "").strip()
+    if chave_env:
+        return chave_env
+
+    if not forcar:
+        chave_cache = obter_config("PAGBANK_WEBHOOK_PUBLIC_KEY")
+        if chave_cache:
+            return chave_cache
+
+    resposta = requests.get(
+        f"{PAGBANK_BASE_URL}/public-keys",
+        params={"type": "webhook"},
+        headers=pagbank_headers(),
+        timeout=PAGBANK_TIMEOUT,
+    )
+
+    if resposta.status_code != 200:
+        raise RuntimeError(
+            f"Não foi possível obter a chave pública do webhook: "
+            f"{resposta.status_code}"
+        )
+
+    dados = resposta.json()
+    public_key = dados.get("public_key")
+
+    if not public_key:
+        raise RuntimeError("PagBank não retornou public_key.")
+
+    salvar_config("PAGBANK_WEBHOOK_PUBLIC_KEY", public_key)
+    return public_key
+
+
+def verificar_assinatura_webhook(raw_body, header, forcar=False):
+    if not header:
+        return False
+
+    public_key_b64 = obter_public_key_webhook(forcar=forcar)
+
+    try:
+        public_key_der = base64.b64decode(public_key_b64)
+        public_key = serialization.load_der_public_key(public_key_der)
+    except Exception:
+        return False
+
+    assinaturas = []
+
+    for parte in header.split(","):
+        parte = parte.strip()
+        if parte:
+            assinaturas.append(parte)
+
+    for assinatura in assinaturas:
+        try:
+            assinatura_bytes = base64.b64decode(assinatura)
+            public_key.verify(
+                assinatura_bytes,
+                raw_body,
+                ec.ECDSA(hashes.SHA256()),
             )
-        ).scalar()
-        or 0
-    )
+            return True
+        except Exception:
+            continue
 
-    pagos = (
-        db.query(
-            func.count(
-                Cliente.id
-            )
-        )
-        .filter(
-            Cliente.status == "Pago"
-        )
-        .scalar()
-        or 0
-    )
+    return False
 
-    pendentes = (
-        db.query(
-            func.count(
-                Cliente.id
-            )
-        )
-        .filter(
-            Cliente.status == "Pendente"
-        )
-        .scalar()
-        or 0
-    )
+def extrair_dados_pagbank(payload):
+    charges = payload.get("charges") or []
+    charge = charges[0] if charges else {}
 
-    recebido = (
-        db.query(
-            func.coalesce(
-                func.sum(
-                    Cliente.valor
-                ),
-                0
-            )
-        )
-        .filter(
-            Cliente.status == "Pago"
-        )
-        .scalar()
-        or 0
-    )
-
-    pendente_valor = (
-        db.query(
-            func.coalesce(
-                func.sum(
-                    Cliente.valor
-                ),
-                0
-            )
-        )
-        .filter(
-            Cliente.status == "Pendente"
-        )
-        .scalar()
-        or 0
-    )
-
-    recebido = float(
-        recebido
-    )
-
-    pendente_valor = float(
-        pendente_valor
-    )
-
-    previsto = (
-        recebido
-        + pendente_valor
-    )
-
-    percentual = (
-        (pagos / total) * 100
-        if total
-        else 0
+    referencia = (
+        payload.get("reference_id")
+        or charge.get("reference_id")
     )
 
     return {
-        "total": total,
-        "pagos": pagos,
-        "pendentes": pendentes,
-        "recebido": recebido,
-        "pendente_valor":
-            pendente_valor,
-        "previsto": previsto,
-        "percentual":
-            percentual,
-    }
-
-
-# ============================================================
-# GRAFICO
-# ============================================================
-
-def obter_grafico_mensal(db):
-
-    clientes = (
-        db.query(Cliente)
-        .filter(
-            Cliente.status == "Pago",
-            Cliente.data_pagamento.isnot(None)
-        )
-        .order_by(
-            Cliente.data_pagamento.asc()
-        )
-        .all()
-    )
-
-    meses = defaultdict(float)
-
-    nomes_meses = [
-        "Jan",
-        "Fev",
-        "Mar",
-        "Abr",
-        "Mai",
-        "Jun",
-        "Jul",
-        "Ago",
-        "Set",
-        "Out",
-        "Nov",
-        "Dez",
-    ]
-
-    for cliente in clientes:
-
-        if not cliente.data_pagamento:
-
-            continue
-
-        chave = (
-            cliente.data_pagamento.year,
-            cliente.data_pagamento.month
-        )
-
-        meses[chave] += float(
-            cliente.valor or 0
-        )
-
-    hoje = date.today()
-
-    resultado = []
-
-    for i in range(5, -1, -1):
-
-        ano = hoje.year
-        mes = hoje.month - i
-
-        while mes <= 0:
-
-            mes += 12
-            ano -= 1
-
-        valor = meses.get(
-            (ano, mes),
-            0
-        )
-
-        resultado.append({
-            "label":
-                f"{nomes_meses[mes - 1]}"
-                f"/{str(ano)[-2:]}",
-
-            "valor":
-                round(valor, 2)
-        })
-
-    maior = max(
-        [
-            x["valor"]
-            for x in resultado
-        ]
-        or [1]
-    )
-
-    for item in resultado:
-
-        item["percentual"] = (
-            (
-                item["valor"]
-                / maior
-            ) * 100
-            if maior > 0
-            else 0
-        )
-
-    return resultado
-
-
-def obter_clientes_recentes(db):
-
-    return (
-        db.query(Cliente)
-        .order_by(
-            Cliente.criado_em.desc()
-        )
-        .limit(5)
-        .all()
-    )
-
-
-# ============================================================
-# DESIGN
-# ============================================================
-
-BASE = r"""
-<!doctype html>
-
-<html lang="pt-BR">
-
-<head>
-
-<meta charset="utf-8">
-
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1"
->
-
-<title>
-    {{ title }} · IPTV Manager
-</title>
-
-<style>
-
-:root {
-    --bg:#070b12;
-    --bg2:#0b1220;
-    --panel:#111827;
-    --panel2:#151e2d;
-    --border:#243044;
-    --text:#f8fafc;
-    --muted:#94a3b8;
-    --blue:#3b82f6;
-    --blue2:#2563eb;
-    --green:#22c55e;
-    --yellow:#facc15;
-    --red:#ef4444;
-    --cyan:#06b6d4;
-    --shadow:0 18px 50px rgba(0,0,0,.25);
-}
-
-* {
-    box-sizing:border-box;
-}
-
-html {
-    scroll-behavior:smooth;
-}
-
-body {
-    margin:0;
-    background:
-        radial-gradient(
-            circle at 10% 0%,
-            rgba(37,99,235,.13),
-            transparent 30%
+        "order_id": payload.get("id"),
+        "charge_id": charge.get("id"),
+        "reference_id": referencia,
+        "status": charge.get("status") or payload.get("status"),
+        "valor": (
+            (charge.get("amount") or {}).get("value")
+            or (charge.get("amount") or {}).get("summary", {}).get("paid")
         ),
-        radial-gradient(
-            circle at 90% 10%,
-            rgba(6,182,212,.08),
-            transparent 25%
-        ),
-        linear-gradient(
-            135deg,
-            #060910,
-            #0b1220
-        );
-    color:var(--text);
-    font-family:
-        Inter,
-        system-ui,
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        sans-serif;
-}
-
-a {
-    text-decoration:none;
-    color:inherit;
-}
-
-button,
-input,
-select {
-    font:inherit;
-}
-
-.layout {
-    min-height:100vh;
-    display:flex;
-}
-
-.sidebar {
-    width:255px;
-    background:rgba(8,13,22,.94);
-    border-right:1px solid var(--border);
-    padding:22px 15px;
-    position:fixed;
-    inset:0 auto 0 0;
-    z-index:100;
-    backdrop-filter:blur(18px);
-}
-
-.brand {
-    display:flex;
-    align-items:center;
-    gap:12px;
-    padding:7px 10px 25px;
-}
-
-.brand-icon {
-    width:45px;
-    height:45px;
-    border-radius:13px;
-    background:linear-gradient(
-        135deg,
-        #2563eb,
-        #06b6d4
-    );
-    display:grid;
-    place-items:center;
-    font-size:22px;
-    box-shadow:
-        0 8px 25px
-        rgba(37,99,235,.25);
-}
-
-.brand strong {
-    display:block;
-    font-size:18px;
-    font-weight:850;
-}
-
-.brand span {
-    display:block;
-    font-size:11px;
-    color:var(--muted);
-    margin-top:2px;
-}
-
-.nav-title {
-    font-size:10px;
-    color:#64748b;
-    text-transform:uppercase;
-    letter-spacing:1.3px;
-    padding:0 12px 8px;
-}
-
-.nav a {
-    display:flex;
-    align-items:center;
-    gap:10px;
-    padding:12px;
-    border-radius:11px;
-    color:#cbd5e1;
-    margin:4px 0;
-    transition:.2s;
-}
-
-.nav a:hover {
-    background:rgba(255,255,255,.05);
-    color:white;
-    transform:translateX(2px);
-}
-
-.nav a.active {
-    background:
-        linear-gradient(
-            90deg,
-            rgba(37,99,235,.25),
-            rgba(37,99,235,.08)
-        );
-    color:white;
-    border:
-        1px solid
-        rgba(59,130,246,.25);
-}
-
-.sidebar-footer {
-    position:absolute;
-    left:15px;
-    right:15px;
-    bottom:20px;
-}
-
-.logout {
-    display:block;
-    text-align:center;
-    padding:11px;
-    border:1px solid var(--border);
-    border-radius:11px;
-    color:#cbd5e1;
-}
-
-.main {
-    margin-left:255px;
-    width:calc(100% - 255px);
-    min-height:100vh;
-    padding:30px;
-    max-width:1600px;
-}
-
-.top {
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    gap:15px;
-    margin-bottom:25px;
-}
-
-h1 {
-    font-size:30px;
-    margin:0 0 5px;
-    font-weight:850;
-}
-
-h2,
-h3 {
-    margin-top:0;
-}
-
-.subtitle {
-    color:var(--muted);
-    font-size:13px;
-}
-
-.grid {
-    display:grid;
-    grid-template-columns:repeat(4,1fr);
-    gap:16px;
-    margin-bottom:18px;
-}
-
-.grid2 {
-    display:grid;
-    grid-template-columns:repeat(2,1fr);
-    gap:18px;
-}
-
-.card {
-    background:
-        linear-gradient(
-            145deg,
-            rgba(17,24,39,.94),
-            rgba(13,20,32,.94)
-        );
-    border:1px solid var(--border);
-    border-radius:17px;
-    padding:20px;
-    box-shadow:var(--shadow);
-}
-
-.metric-label {
-    color:var(--muted);
-    font-size:12px;
-}
-
-.metric {
-    font-size:27px;
-    font-weight:850;
-    margin-top:8px;
-}
-
-.metric-small {
-    color:var(--muted);
-    font-size:12px;
-    margin-top:5px;
-}
-
-.green { color:var(--green); }
-.yellow { color:var(--yellow); }
-.red { color:var(--red); }
-.blue { color:#60a5fa; }
-.cyan { color:#22d3ee; }
-
-.toolbar {
-    display:flex;
-    gap:10px;
-    flex-wrap:wrap;
-    margin-bottom:18px;
-}
-
-input,
-select {
-    width:100%;
-    background:#0a111e;
-    color:white;
-    border:1px solid var(--border);
-    border-radius:10px;
-    padding:12px;
-    outline:none;
-}
-
-input:focus,
-select:focus {
-    border-color:var(--blue);
-    box-shadow:
-        0 0 0 3px
-        rgba(59,130,246,.10);
-}
-
-.form-grid {
-    display:grid;
-    grid-template-columns:repeat(2,1fr);
-    gap:16px;
-}
-
-label {
-    display:block;
-    color:#cbd5e1;
-    font-size:13px;
-    margin-bottom:7px;
-    font-weight:650;
-}
-
-.btn {
-    border:0;
-    border-radius:10px;
-    padding:10px 14px;
-    font-weight:750;
-    cursor:pointer;
-    display:inline-flex;
-    align-items:center;
-    justify-content:center;
-    gap:6px;
-}
-
-.primary {
-    background:
-        linear-gradient(
-            135deg,
-            #3b82f6,
-            #2563eb
-        );
-    color:white;
-}
-
-.secondary {
-    background:#172236;
-    color:white;
-    border:1px solid var(--border);
-}
-
-.success {
-    background:rgba(34,197,94,.14);
-    color:#86efac;
-    border:1px solid rgba(34,197,94,.20);
-}
-
-.danger {
-    background:rgba(239,68,68,.12);
-    color:#fecaca;
-    border:1px solid rgba(239,68,68,.20);
-}
-
-.warning {
-    background:rgba(250,204,21,.12);
-    color:#fde68a;
-}
-
-.full {
-    width:100%;
-}
-
-.mt {
-    margin-top:16px;
-}
-
-.actions {
-    display:flex;
-    gap:7px;
-    flex-wrap:wrap;
-}
-
-.flash {
-    padding:13px 16px;
-    border-radius:11px;
-    background:rgba(37,99,235,.12);
-    border:1px solid rgba(59,130,246,.25);
-    margin-bottom:18px;
-    color:#bfdbfe;
-}
-
-.client {
-    display:grid;
-    grid-template-columns:2fr 1fr 1fr 1fr auto;
-    gap:15px;
-    align-items:center;
-    padding:16px;
-    border:1px solid var(--border);
-    border-radius:15px;
-    background:rgba(16,24,39,.82);
-    margin-bottom:10px;
-}
-
-.name {
-    font-size:16px;
-    font-weight:850;
-}
-
-.username {
-    font-size:12px;
-    color:var(--muted);
-    margin-top:3px;
-}
-
-.badge {
-    display:inline-flex;
-    align-items:center;
-    padding:6px 10px;
-    border-radius:999px;
-    font-size:11px;
-    font-weight:850;
-}
-
-.badge.paid {
-    background:rgba(34,197,94,.13);
-    color:#4ade80;
-}
-
-.badge.pending {
-    background:rgba(250,204,21,.13);
-    color:#fde047;
-}
-
-.badge.waiting {
-    background:rgba(59,130,246,.13);
-    color:#93c5fd;
-}
-
-.drawer {
-    margin-top:9px;
-    border:1px solid var(--border);
-    border-radius:12px;
-    overflow:hidden;
-    background:rgba(8,13,22,.55);
-}
-
-.drawer summary {
-    cursor:pointer;
-    padding:11px 13px;
-    color:#cbd5e1;
-    font-size:12px;
-    font-weight:700;
-}
-
-.drawer-content {
-    padding:14px;
-    border-top:1px solid var(--border);
-    display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:12px;
-}
-
-.detail-box {
-    padding:11px;
-    border-radius:10px;
-    background:#0b1220;
-}
-
-.detail-label {
-    color:var(--muted);
-    font-size:10px;
-    text-transform:uppercase;
-}
-
-.detail-value {
-    margin-top:4px;
-    font-weight:750;
-    font-size:13px;
-}
-
-.chart-card {
-    min-height:280px;
-}
-
-.chart-bars {
-    height:190px;
-    display:flex;
-    align-items:end;
-    gap:14px;
-    padding:20px 5px 5px;
-}
-
-.chart-column {
-    flex:1;
-    height:100%;
-    display:flex;
-    flex-direction:column;
-    justify-content:end;
-    align-items:center;
-    gap:7px;
-}
-
-.chart-bar {
-    width:100%;
-    max-width:48px;
-    min-height:4px;
-    border-radius:8px 8px 3px 3px;
-    background:
-        linear-gradient(
-            180deg,
-            #60a5fa,
-            #2563eb
-        );
-}
-
-.chart-value {
-    font-size:10px;
-    color:#cbd5e1;
-}
-
-.chart-label {
-    font-size:10px;
-    color:var(--muted);
-}
-
-.progress-wrap {
-    margin-top:15px;
-}
-
-.progress {
-    width:100%;
-    height:11px;
-    background:#1e293b;
-    border-radius:99px;
-    overflow:hidden;
-}
-
-.progress span {
-    display:block;
-    height:100%;
-    background:
-        linear-gradient(
-            90deg,
-            #22c55e,
-            #3b82f6
-        );
-    border-radius:99px;
-}
-
-.financial {
-    display:grid;
-    gap:18px;
-}
-
-.financial-row {
-    display:grid;
-    grid-template-columns:90px 1fr 105px;
-    align-items:center;
-    gap:10px;
-}
-
-.financial-track {
-    height:13px;
-    background:#1e293b;
-    border-radius:99px;
-    overflow:hidden;
-}
-
-.financial-fill {
-    height:100%;
-    border-radius:99px;
-}
-
-.financial-green {
-    background:
-        linear-gradient(
-            90deg,
-            #16a34a,
-            #4ade80
-        );
-}
-
-.financial-yellow {
-    background:
-        linear-gradient(
-            90deg,
-            #ca8a04,
-            #fde047
-        );
-}
-
-.recent {
-    display:grid;
-    gap:9px;
-}
-
-.recent-item {
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    gap:10px;
-    padding:12px;
-    border-radius:11px;
-    background:#0b1220;
-    border:1px solid var(--border);
-}
-
-.recent-name {
-    font-weight:750;
-    font-size:13px;
-}
-
-.recent-user {
-    color:var(--muted);
-    font-size:11px;
-    margin-top:2px;
-}
-
-table {
-    width:100%;
-    border-collapse:collapse;
-}
-
-th,
-td {
-    text-align:left;
-    padding:12px;
-    border-bottom:1px solid var(--border);
-    font-size:13px;
-}
-
-th {
-    color:#94a3b8;
-    font-weight:650;
-}
-
-.empty {
-    text-align:center;
-    padding:45px;
-    color:var(--muted);
-}
-
-.pix-box {
-    text-align:center;
-    max-width:500px;
-    margin:auto;
-}
-
-.pix-qrcode {
-    width:280px;
-    max-width:100%;
-    background:white;
-    padding:10px;
-    border-radius:15px;
-    margin:15px auto;
-    display:block;
-}
-
-.pix-code {
-    width:100%;
-    min-height:100px;
-    resize:vertical;
-    font-size:12px;
-}
-
-.payment-success {
-    padding:25px;
-    border-radius:15px;
-    background:rgba(34,197,94,.10);
-    border:1px solid rgba(34,197,94,.30);
-    text-align:center;
-}
-
-.payment-waiting {
-    padding:25px;
-    border-radius:15px;
-    background:rgba(59,130,246,.10);
-    border:1px solid rgba(59,130,246,.30);
-    text-align:center;
-}
-
-.mobile-menu {
-    display:none;
-}
-
-@media(max-width:1100px) {
-
-    .grid {
-        grid-template-columns:repeat(2,1fr);
+        "paid_at": charge.get("paid_at"),
     }
 
-    .client {
-        grid-template-columns:1fr 1fr;
-    }
-}
 
-@media(max-width:800px) {
-
-    .sidebar {
-        width:220px;
-        transform:translateX(-100%);
-        transition:.25s;
-    }
-
-    .sidebar.open {
-        transform:translateX(0);
-    }
-
-    .mobile-menu {
-        display:inline-flex;
-        position:fixed;
-        top:14px;
-        left:14px;
-        z-index:200;
-        width:42px;
-        height:42px;
-        border-radius:11px;
-        border:1px solid var(--border);
-        background:#111827;
-        color:white;
-        align-items:center;
-        justify-content:center;
-        cursor:pointer;
-    }
-
-    .main {
-        margin-left:0;
-        width:100%;
-        padding:65px 16px 25px;
-    }
-
-    .grid,
-    .grid2,
-    .form-grid {
-        grid-template-columns:1fr;
-    }
-
-    .top {
-        align-items:flex-start;
-        flex-direction:column;
-    }
-
-    .client {
-        grid-template-columns:1fr;
-    }
-
-    .drawer-content {
-        grid-template-columns:1fr;
-    }
-
-    .financial-row {
-        grid-template-columns:75px 1fr 90px;
-    }
-}
-
-</style>
-
-</head>
-
-<body>
-
-<button
-    class="mobile-menu"
-    onclick="
-        document
-        .querySelector('.sidebar')
-        .classList
-        .toggle('open')
-    "
->
-    ☰
-</button>
-
-<div class="layout">
-
-<aside class="sidebar">
-
-<div class="brand">
-
-<div class="brand-icon">
-    📺
-</div>
-
-<div>
-
-<strong>
-    IPTV Manager
-</strong>
-
-<span>
-    Administração
-</span>
-
-</div>
-
-</div>
-
-<div class="nav-title">
-    Menu principal
-</div>
-
-<nav class="nav">
-
-<a
-    class="{{ 'active' if active=='dashboard' else '' }}"
-    href="{{ url_for('dashboard') }}"
->
-    📊
-    <span>Dashboard</span>
-</a>
-
-<a
-    class="{{ 'active' if active=='clientes' else '' }}"
-    href="{{ url_for('clientes') }}"
->
-    👥
-    <span>Clientes</span>
-</a>
-
-<a
-    class="{{ 'active' if active=='novo' else '' }}"
-    href="{{ url_for('novo_cliente') }}"
->
-    ➕
-    <span>Adicionar cliente</span>
-</a>
-
-<a
-    class="{{ 'active' if active=='importar' else '' }}"
-    href="{{ url_for('importar') }}"
->
-    📥
-    <span>Importar clientes</span>
-</a>
-
-<a
-    class="{{ 'active' if active=='pagamentos' else '' }}"
-    href="{{ url_for('pagamentos_admin') }}"
->
-    💳
-    <span>Pagamentos Pix</span>
-</a>
-
-<a
-    class="{{ 'active' if active=='relatorios' else '' }}"
-    href="{{ url_for('relatorios') }}"
->
-    📈
-    <span>Relatórios</span>
-</a>
-
-</nav>
-
-<div class="sidebar-footer">
-
-<a
-    class="logout"
-    href="{{ url_for('logout') }}"
->
-    🚪 Sair do sistema
-</a>
-
-</div>
-
-</aside>
-
-<main class="main">
-
-{% with messages = get_flashed_messages() %}
-
-{% for message in messages %}
-
-<div class="flash">
-    {{ message }}
-</div>
-
-{% endfor %}
-
-{% endwith %}
-
-{{ content | safe }}
-
-</main>
-
-</div>
-
-</body>
-
-</html>
-"""
-
-
-# ============================================================
-# LOGIN
-# ============================================================
-
-LOGIN = r"""
-<!doctype html>
-
-<html lang="pt-BR">
-
-<head>
-
-<meta charset="utf-8">
-
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
->
-
-<title>
-    Login · IPTV Manager
-</title>
-
-<style>
-
-* {
-    box-sizing:border-box;
-}
-
-body {
-    margin:0;
-    min-height:100vh;
-    display:grid;
-    place-items:center;
-    padding:20px;
-    background:
-        radial-gradient(
-            circle at 10% 10%,
-            rgba(37,99,235,.18),
-            transparent 35%
-        ),
-        linear-gradient(
-            135deg,
-            #060910,
-            #0b1220
-        );
-    color:white;
-    font-family:
-        Inter,
-        system-ui,
-        sans-serif;
-}
-
-.login {
-    width:min(420px,100%);
-    background:rgba(17,24,39,.96);
-    border:1px solid #243044;
-    border-radius:22px;
-    padding:32px;
-    box-shadow:
-        0 25px 80px
-        rgba(0,0,0,.40);
-}
-
-.icon {
-    width:60px;
-    height:60px;
-    margin:auto;
-    border-radius:16px;
-    display:grid;
-    place-items:center;
-    background:
-        linear-gradient(
-            135deg,
-            #2563eb,
-            #06b6d4
-        );
-    font-size:29px;
-}
-
-h1 {
-    text-align:center;
-    margin:15px 0 5px;
-    font-size:26px;
-}
-
-.sub {
-    text-align:center;
-    color:#94a3b8;
-    margin-bottom:25px;
-    font-size:13px;
-}
-
-label {
-    display:block;
-    color:#cbd5e1;
-    font-size:13px;
-    margin:13px 0 7px;
-}
-
-input {
-    width:100%;
-    padding:13px;
-    border-radius:10px;
-    border:1px solid #243044;
-    background:#0b1220;
-    color:white;
-    font-size:15px;
-    outline:none;
-}
-
-button {
-    width:100%;
-    margin-top:18px;
-    padding:13px;
-    border:0;
-    border-radius:10px;
-    background:
-        linear-gradient(
-            135deg,
-            #3b82f6,
-            #2563eb
-        );
-    color:white;
-    font-weight:800;
-    font-size:15px;
-    cursor:pointer;
-}
-
-.error {
-    background:rgba(239,68,68,.12);
-    color:#fecaca;
-    border:1px solid rgba(239,68,68,.20);
-    padding:11px;
-    border-radius:9px;
-    margin-bottom:12px;
-    font-size:13px;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="login">
-
-<div class="icon">
-    📺
-</div>
-
-<h1>
-    IPTV Manager
-</h1>
-
-<div class="sub">
-    Painel administrativo
-</div>
-
-{% if error %}
-
-<div class="error">
-    {{ error }}
-</div>
-
-{% endif %}
-
-<form method="post">
-
-<label>
-    Usuário
-</label>
-
-<input
-    name="usuario"
-    autocomplete="username"
-    required
-    placeholder="Digite seu usuário"
->
-
-<label>
-    Senha
-</label>
-
-<input
-    type="password"
-    name="senha"
-    autocomplete="current-password"
-    required
-    placeholder="Digite sua senha"
->
-
-<button>
-    Entrar no sistema
-</button>
-
-</form>
-
-</div>
-
-</body>
-
-</html>
-"""
-
-
-# ============================================================
-# RENDERIZAÇÃO
-# ============================================================
-
-def page(
-    content,
-    title,
-    active,
-    **context
-):
-
-    context["dinheiro"] = dinheiro
-    context["formatar_data"] = formatar_data
-
-    rendered_content = render_template_string(
-        content,
-        **context
-    )
-
-    return render_template_string(
-        BASE,
-        content=rendered_content,
-        title=title,
-        active=active
-    )
-
-
-# ============================================================
-# LOGIN
-# ============================================================
-
-@app.route(
-    "/login",
-    methods=["GET", "POST"]
-)
-def login():
-
-    if request.method == "POST":
-
-        usuario = request.form.get(
-            "usuario",
-            ""
-        ).strip()
-
-        senha = request.form.get(
-            "senha",
-            ""
-        )
-
-        if (
-            usuario == ADMIN_USER
-            and senha == ADMIN_PASSWORD
-        ):
-
-            session["logged_in"] = True
-
-            return redirect(
-                url_for("dashboard")
-            )
-
-        return render_template_string(
-            LOGIN,
-            error=
-                "Usuário ou senha incorretos."
-        )
-
-    return render_template_string(
-        LOGIN,
-        error=None
-    )
-
-
-@app.route("/logout")
-def logout():
-
-    session.clear()
-
-    return redirect(
-        url_for("login")
-    )
-
-
-@app.route("/")
-def index():
-
-    if session.get("logged_in"):
-
-        return redirect(
-            url_for("dashboard")
-        )
-
-    return redirect(
-        url_for("login")
-    )
-
-
-# ============================================================
-# DASHBOARD
-# ============================================================
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-
-    db = SessionLocal()
-
-    try:
-
-        resumo = obter_resumo(db)
-
-        grafico_mensal = (
-            obter_grafico_mensal(db)
-        )
-
-        recentes = (
-            obter_clientes_recentes(db)
-        )
-
-        content = r"""
-
-<div class="top">
-
-<div>
-
-<h1>
-    Dashboard
-</h1>
-
-<div class="subtitle">
-    Visão geral da sua operação
-</div>
-
-</div>
-
-<div class="actions">
-
-<a
-    class="btn secondary"
-    href="{{ url_for('clientes') }}"
->
-    👥 Ver clientes
-</a>
-
-<a
-    class="btn primary"
-    href="{{ url_for('novo_cliente') }}"
->
-    ＋ Novo cliente
-</a>
-
-</div>
-
-</div>
-
-<div class="grid">
-
-<div class="card">
-
-<div class="metric-label">
-    👥 Total de clientes
-</div>
-
-<div class="metric">
-    {{ resumo.total }}
-</div>
-
-<div class="metric-small">
-    Clientes cadastrados
-</div>
-
-</div>
-
-<div class="card">
-
-<div class="metric-label">
-    🟢 Clientes pagos
-</div>
-
-<div class="metric green">
-    {{ resumo.pagos }}
-</div>
-
-<div class="metric-small">
-    {{ "%.1f"|format(resumo.percentual) }}% da base
-</div>
-
-</div>
-
-<div class="card">
-
-<div class="metric-label">
-    🟡 Pendentes
-</div>
-
-<div class="metric yellow">
-    {{ resumo.pendentes }}
-</div>
-
-<div class="metric-small">
-    Aguardando pagamento
-</div>
-
-</div>
-
-<div class="card">
-
-<div class="metric-label">
-    💰 Total recebido
-</div>
-
-<div class="metric blue">
-    {{ dinheiro(resumo.recebido) }}
-</div>
-
-<div class="metric-small">
-    Pagamentos confirmados
-</div>
-
-</div>
-
-</div>
-
-<div class="grid2">
-
-<div class="card chart-card">
-
-<h3>
-    📈 Recebimentos
-</h3>
-
-<div class="subtitle">
-    Evolução dos pagamentos registrados
-</div>
-
-<div class="chart-bars">
-
-{% for item in grafico_mensal %}
-
-<div class="chart-column">
-
-<div class="chart-value">
-    {{ dinheiro(item.valor) }}
-</div>
-
-<div
-    class="chart-bar"
-    style="
-        height:
-        {{ item.percentual if item.percentual > 2 else 2 }}%;
-    "
-></div>
-
-<div class="chart-label">
-    {{ item.label }}
-</div>
-
-</div>
-
-{% endfor %}
-
-</div>
-
-</div>
-
-<div class="card">
-
-<h3>
-    💰 Resumo financeiro
-</h3>
-
-<div class="subtitle">
-    Situação atual da receita
-</div>
-
-<div class="financial" style="margin-top:25px;">
-
-{% set recebido_percentual =
-    (resumo.recebido / resumo.previsto * 100)
-    if resumo.previsto
-    else 0
-%}
-
-{% set pendente_percentual =
-    (resumo.pendente_valor / resumo.previsto * 100)
-    if resumo.previsto
-    else 0
-%}
-
-<div class="financial-row">
-
-<strong>
-    Recebido
-</strong>
-
-<div class="financial-track">
-
-<div
-    class="financial-fill financial-green"
-    style="width:{{ recebido_percentual }}%;"
-></div>
-
-</div>
-
-<strong class="green">
-    {{ dinheiro(resumo.recebido) }}
-</strong>
-
-</div>
-
-<div class="financial-row">
-
-<strong>
-    Pendente
-</strong>
-
-<div class="financial-track">
-
-<div
-    class="financial-fill financial-yellow"
-    style="width:{{ pendente_percentual }}%;"
-></div>
-
-</div>
-
-<strong class="yellow">
-    {{ dinheiro(resumo.pendente_valor) }}
-</strong>
-
-</div>
-
-</div>
-
-<div class="progress-wrap">
-
-<div style="
-    display:flex;
-    justify-content:space-between;
-    font-size:12px;
-    color:#94a3b8;
-">
-
-<span>
-    Pagamentos recebidos
-</span>
-
-<strong>
-    {{ "%.1f"|format(resumo.percentual) }}%
-</strong>
-
-</div>
-
-<div class="progress">
-
-<span
-    style="
-        width:{{ resumo.percentual }}%;
-    "
-></span>
-
-</div>
-
-</div>
-
-</div>
-
-</div>
-
-<div
-    class="grid2"
-    style="margin-top:18px;"
->
-
-<div class="card">
-
-<h3>
-    🆕 Clientes recentes
-</h3>
-
-<div class="recent" style="margin-top:15px;">
-
-{% for cliente in recentes %}
-
-<div class="recent-item">
-
-<div>
-
-<div class="recent-name">
-    {{ cliente.nome }}
-</div>
-
-<div class="recent-user">
-    {{ cliente.usuario }}
-</div>
-
-</div>
-
-<span
-    class="badge
-    {{ 'paid'
-       if cliente.status == 'Pago'
-       else 'pending' }}"
->
-
-{{ cliente.status }}
-
-</span>
-
-</div>
-
-{% else %}
-
-<div class="empty">
-    Nenhum cliente cadastrado.
-</div>
-
-{% endfor %}
-
-</div>
-
-</div>
-
-<div class="card">
-
-<h3>
-    ⚡ Ações rápidas
-</h3>
-
-<div
-    style="
-        display:grid;
-        grid-template-columns:1fr 1fr;
-        gap:10px;
-        margin-top:18px;
-    "
->
-
-<a
-    class="btn primary"
-    href="{{ url_for('novo_cliente') }}"
->
-    ➕ Cadastrar
-</a>
-
-<a
-    class="btn secondary"
-    href="{{ url_for('clientes') }}"
->
-    👥 Clientes
-</a>
-
-<a
-    class="btn secondary"
-    href="{{ url_for('pagamentos_admin') }}"
->
-    💳 Pagamentos
-</a>
-
-<a
-    class="btn secondary"
-    href="{{ url_for('relatorios') }}"
->
-    📈 Relatórios
-</a>
-
-</div>
-
-</div>
-
-</div>
-
-"""
-
-        return page(
-            content,
-            "Dashboard",
-            "dashboard",
-            resumo=resumo,
-            grafico_mensal=grafico_mensal,
-            recentes=recentes
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# CLIENTES
-# ============================================================
-
-@app.route("/clientes")
-@login_required
-def clientes():
-
-    db = SessionLocal()
-
-    try:
-
-        busca = request.args.get(
-            "busca",
-            ""
-        ).strip()
-
-        status = request.args.get(
-            "status",
-            "Todos"
-        )
-
-        query = db.query(
-            Cliente
-        )
-
-        if busca:
-
-            termo = f"%{busca}%"
-
-            query = query.filter(
-                (
-                    Cliente.nome.ilike(
-                        termo
-                    )
-                )
-                |
-                (
-                    Cliente.usuario.ilike(
-                        termo
-                    )
-                )
-            )
-
-        if status in (
-            "Pago",
-            "Pendente"
-        ):
-
-            query = query.filter(
-                Cliente.status == status
-            )
-
-        lista = (
-            query
-            .order_by(
-                Cliente.nome.asc()
-            )
-            .all()
-        )
-
-        content = r"""
-
-<div class="top">
-
-<div>
-
-<h1>
-    Clientes
-</h1>
-
-<div class="subtitle">
-    Gerencie clientes, pagamentos e usuários.
-</div>
-
-</div>
-
-<a
-    class="btn primary"
-    href="{{ url_for('novo_cliente') }}"
->
-    ＋ Novo cliente
-</a>
-
-</div>
-
-<div class="card" style="margin-bottom:18px;">
-
-<form method="get" class="toolbar">
-
-<div style="flex:2;min-width:220px;">
-
-<label>
-    Pesquisar cliente
-</label>
-
-<input
-    name="busca"
-    value="{{ busca }}"
-    placeholder="Nome ou usuário..."
->
-
-</div>
-
-<div style="flex:1;min-width:160px;">
-
-<label>
-    Status
-</label>
-
-<select name="status">
-
-<option
-    value="Todos"
-    {{ 'selected' if status == 'Todos' }}
->
-    Todos
-</option>
-
-<option
-    value="Pago"
-    {{ 'selected' if status == 'Pago' }}
->
-    Pagos
-</option>
-
-<option
-    value="Pendente"
-    {{ 'selected' if status == 'Pendente' }}
->
-    Pendentes
-</option>
-
-</select>
-
-</div>
-
-<div style="align-self:end;">
-
-<button
-    class="btn primary"
-    type="submit"
->
-    🔎 Filtrar
-</button>
-
-</div>
-
-</form>
-
-<div
-    style="
-        color:#94a3b8;
-        font-size:12px;
-    "
->
-
-{{ lista|length }}
-cliente(s) encontrado(s)
-
-</div>
-
-</div>
-
-{% if lista %}
-
-{% for c in lista %}
-
-<div class="client">
-
-<div>
-
-<div class="name">
-    {{ c.nome }}
-</div>
-
-<div class="username">
-    {{ c.usuario }}
-</div>
-
-<details class="drawer">
-
-<summary>
-    ▾ Ver detalhes
-</summary>
-
-<div class="drawer-content">
-
-<div class="detail-box">
-
-<div class="detail-label">
-    Valor
-</div>
-
-<div class="detail-value">
-    {{ dinheiro(c.valor) }}
-</div>
-
-</div>
-
-<div class="detail-box">
-
-<div class="detail-label">
-    Vencimento
-</div>
-
-<div class="detail-value">
-    {{ formatar_data(c.vencimento) }}
-</div>
-
-</div>
-
-<div class="detail-box">
-
-<div class="detail-label">
-    Pagamento
-</div>
-
-<div class="detail-value">
-    {{ formatar_data(c.data_pagamento) }}
-</div>
-
-</div>
-
-</div>
-
-</details>
-
-</div>
-
-<div>
-
-<div class="metric-label">
-    Mensalidade
-</div>
-
-<strong>
-    {{ dinheiro(c.valor) }}
-</strong>
-
-</div>
-
-<div>
-
-<div class="metric-label">
-    Vencimento
-</div>
-
-<strong>
-    {{ formatar_data(c.vencimento) }}
-</strong>
-
-</div>
-
-<div>
-
-<span
-    class="badge
-    {{ 'paid'
-       if c.status == 'Pago'
-       else 'pending' }}"
->
-
-{{ '✓ Pago'
-   if c.status == 'Pago'
-   else '⏳ Pendente' }}
-
-</span>
-
-</div>
-
-<div class="actions">
-
-<form
-    method="post"
-    action="{{ url_for(
-        'alternar_status',
-        cliente_id=c.id
-    ) }}"
->
-
-<button
-    class="btn
-    {{ 'secondary'
-       if c.status == 'Pago'
-       else 'success' }}"
-    type="submit"
->
-
-{{ 'Marcar pendente'
-   if c.status == 'Pago'
-   else 'Marcar pago' }}
-
-</button>
-
-</form>
-
-<a
-    class="btn secondary"
-    href="{{ url_for(
-        'editar_cliente',
-        cliente_id=c.id
-    ) }}"
->
-    Editar
-</a>
-
-<form
-    method="post"
-    action="{{ url_for(
-        'excluir_cliente',
-        cliente_id=c.id
-    ) }}"
-    onsubmit="
-        return confirm(
-            'Excluir este cliente definitivamente?'
-        );
-    "
->
-
-<button
-    class="btn danger"
-    type="submit"
->
-    Excluir
-</button>
-
-</form>
-
-</div>
-
-</div>
-
-{% endfor %}
-
-{% else %}
-
-<div class="card empty">
-
-<div style="font-size:35px;">
-    👥
-</div>
-
-<h3>
-    Nenhum cliente encontrado
-</h3>
-
-</div>
-
-{% endif %}
-
-"""
-
-        return page(
-            content,
-            "Clientes",
-            "clientes",
-            lista=lista,
-            busca=busca,
-            status=status
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# FORMULÁRIO
-# ============================================================
-
-FORM = r"""
-
-<div class="top">
-
-<div>
-
-<h1>
-    {{ 'Editar cliente'
-       if editar
-       else 'Adicionar cliente' }}
-</h1>
-
-<div class="subtitle">
-
-{{ 'Atualize os dados do cliente.'
-   if editar
-   else 'Cadastre um novo cliente.' }}
-
-</div>
-
-</div>
-
-<a
-    class="btn secondary"
-    href="{{ url_for('clientes') }}"
->
-    ← Voltar
-</a>
-
-</div>
-
-<div class="card">
-
-<form method="post">
-
-<div class="form-grid">
-
-<div>
-
-<label>
-    Nome do cliente
-</label>
-
-<input
-    name="nome"
-    value="{{ c.nome if c else '' }}"
-    required
-    maxlength="150"
-    placeholder="Ex.: João Silva"
->
-
-</div>
-
-<div>
-
-<label>
-    Nome de usuário
-</label>
-
-<input
-    name="usuario"
-    value="{{ c.usuario if c else '' }}"
-    required
-    maxlength="150"
-    placeholder="Ex.: joao123"
->
-
-</div>
-
-<div>
-
-<label>
-    Valor da mensalidade
-</label>
-
-<input
-    type="number"
-    step="0.01"
-    min="0"
-    name="valor"
-    value="{{ c.valor if c else '25.00' }}"
-    required
->
-
-</div>
-
-<div>
-
-<label>
-    Data de vencimento
-</label>
-
-<input
-    type="date"
-    name="vencimento"
-    value="{{
-        c.vencimento.isoformat()
-        if c and c.vencimento
-        else ''
-    }}"
->
-
-</div>
-
-</div>
-
-<div class="actions mt">
-
-<button
-    class="btn primary"
-    type="submit"
->
-
-{{ '💾 Salvar alterações'
-   if editar
-   else '✓ Cadastrar cliente' }}
-
-</button>
-
-<a
-    class="btn secondary"
-    href="{{ url_for('clientes') }}"
->
-    Cancelar
-</a>
-
-</div>
-
-</form>
-
-</div>
-
-"""
-
-
-# ============================================================
-# NOVO CLIENTE
-# ============================================================
-
-@app.route(
-    "/clientes/novo",
-    methods=["GET", "POST"]
-)
-@login_required
-def novo_cliente():
-
-    if request.method == "POST":
-
-        db = SessionLocal()
-
-        try:
-
-            nome = request.form.get(
-                "nome",
-                ""
-            ).strip()
-
-            usuario = request.form.get(
-                "usuario",
-                ""
-            ).strip()
-
-            valor = valor_float(
-                request.form.get(
-                    "valor",
-                    "0"
-                )
-            )
-
-            vencimento_texto = (
-                request.form.get(
-                    "vencimento",
-                    ""
-                ).strip()
-            )
-
-            vencimento = (
-                date.fromisoformat(
-                    vencimento_texto
-                )
-                if vencimento_texto
-                else None
-            )
-
-            if not nome or not usuario:
-
-                flash(
-                    "Nome e usuário são obrigatórios."
-                )
-
-                return redirect(
-                    url_for("novo_cliente")
-                )
-
-            if valor is None:
-
-                flash(
-                    "Valor inválido."
-                )
-
-                return redirect(
-                    url_for("novo_cliente")
-                )
-
-            existente = (
+def processar_pagamento_pago(db, pagamento, valor_confirmado):
+    """Confirma o PIX e renova o cliente automaticamente.
+
+    A função é idempotente: se o mesmo pagamento for processado novamente
+    pelo webhook ou pela consulta automática da página, o vencimento não é
+    alterado duas vezes.
+    """
+    if pagamento.status == "PAGO" and pagamento.vencimento_gerado:
+        return True
+
+    if pagamento.status == "RECEBIDO_SEM_VINCULO" and pagamento.pago_em:
+        # Só impede processamento duplicado quando já houve confirmação real.
+        # Um pagamento criado pelo webhook sem vínculo ainda pode ser ligado
+        # posteriormente caso o cadastro seja localizado.
+        if pagamento.cliente_id:
+            cliente_existente = (
                 db.query(Cliente)
-                .filter(
-                    Cliente.usuario
-                    == usuario
-                )
+                .filter(Cliente.id == pagamento.cliente_id)
                 .first()
             )
-
-            if existente:
-
-                flash(
-                    "Esse nome de usuário já está cadastrado."
-                )
-
-                return redirect(
-                    url_for("novo_cliente")
-                )
-
-            cliente = Cliente(
-                nome=nome,
-                usuario=usuario,
-                valor=valor,
-                vencimento=vencimento,
-                status="Pendente"
-            )
-
-            db.add(cliente)
-            db.commit()
-
-            flash(
-                "Cliente cadastrado com sucesso."
-            )
-
-            return redirect(
-                url_for("clientes")
-            )
-
-        except Exception:
-
-            db.rollback()
-
-            flash(
-                "Não foi possível cadastrar o cliente."
-            )
-
-            return redirect(
-                url_for("novo_cliente")
-            )
-
-        finally:
-
-            db.close()
-
-    return page(
-        FORM,
-        "Adicionar cliente",
-        "novo",
-        c=None,
-        editar=False
-    )
-
-
-# ============================================================
-# EDITAR CLIENTE
-# ============================================================
-
-@app.route(
-    "/clientes/<int:cliente_id>/editar",
-    methods=["GET", "POST"]
-)
-@login_required
-def editar_cliente(
-    cliente_id
-):
-
-    db = SessionLocal()
-
-    try:
-
-        cliente = (
-            db.query(Cliente)
-            .filter(
-                Cliente.id
-                == cliente_id
-            )
-            .first()
-        )
-
-        if not cliente:
-
-            flash(
-                "Cliente não encontrado."
-            )
-
-            return redirect(
-                url_for("clientes")
-            )
-
-        if request.method == "POST":
-
-            nome = request.form.get(
-                "nome",
-                ""
-            ).strip()
-
-            usuario = request.form.get(
-                "usuario",
-                ""
-            ).strip()
-
-            valor = valor_float(
-                request.form.get(
-                    "valor",
-                    "0"
-                )
-            )
-
-            vencimento_texto = (
-                request.form.get(
-                    "vencimento",
-                    ""
-                ).strip()
-            )
-
-            vencimento = (
-                date.fromisoformat(
-                    vencimento_texto
-                )
-                if vencimento_texto
-                else None
-            )
-
-            outro = (
-                db.query(Cliente)
-                .filter(
-                    Cliente.usuario == usuario,
-                    Cliente.id != cliente_id
-                )
-                .first()
-            )
-
-            if outro:
-
-                flash(
-                    "Esse usuário já pertence a outro cliente."
-                )
-
-                return redirect(
-                    url_for(
-                        "editar_cliente",
-                        cliente_id=cliente_id
-                    )
-                )
-
-            cliente.nome = nome
-            cliente.usuario = usuario
-            cliente.valor = valor
-            cliente.vencimento = vencimento
-
-            db.commit()
-
-            flash(
-                "Cliente atualizado com sucesso."
-            )
-
-            return redirect(
-                url_for("clientes")
-            )
-
-        return page(
-            FORM,
-            "Editar cliente",
-            "clientes",
-            c=cliente,
-            editar=True
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# ALTERAR STATUS MANUAL
-# ============================================================
-
-@app.post(
-    "/clientes/<int:cliente_id>/status"
-)
-@login_required
-def alternar_status(
-    cliente_id
-):
-
-    db = SessionLocal()
-
-    try:
-
-        cliente = (
-            db.query(Cliente)
-            .filter(
-                Cliente.id == cliente_id
-            )
-            .first()
-        )
-
-        if not cliente:
-
-            flash(
-                "Cliente não encontrado."
-            )
-
-            return redirect(
-                url_for("clientes")
-            )
-
-        if cliente.status == "Pago":
-
-            cliente.status = "Pendente"
-            cliente.data_pagamento = None
-
-            flash(
-                "Cliente alterado para pendente."
-            )
-
-        else:
-
-            cliente.status = "Pago"
-
-            cliente.data_pagamento = (
-                datetime.utcnow()
-            )
-
-            cliente.vencimento = (
-                calcular_proximo_vencimento(
-                    cliente.vencimento
-                )
-            )
-
-            flash(
-                "Pagamento registrado e vencimento atualizado."
-            )
-
-        db.commit()
-
-        return redirect(
-            request.referrer
-            or url_for("clientes")
-        )
-
-    except Exception:
-
-        db.rollback()
-
-        flash(
-            "Não foi possível alterar o status."
-        )
-
-        return redirect(
-            url_for("clientes")
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# EXCLUIR
-# ============================================================
-
-@app.post(
-    "/clientes/<int:cliente_id>/excluir"
-)
-@login_required
-def excluir_cliente(
-    cliente_id
-):
-
-    db = SessionLocal()
-
-    try:
-
-        cliente = (
-            db.query(Cliente)
-            .filter(
-                Cliente.id == cliente_id
-            )
-            .first()
-        )
-
-        if cliente:
-
-            db.delete(cliente)
-            db.commit()
-
-            flash(
-                "Cliente excluído com sucesso."
-            )
-
-        return redirect(
-            url_for("clientes")
-        )
-
-    except Exception:
-
-        db.rollback()
-
-        flash(
-            "Não foi possível excluir o cliente."
-        )
-
-        return redirect(
-            url_for("clientes")
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# IMPORTAÇÃO CSV
-# ============================================================
-
-@app.route(
-    "/importar",
-    methods=["GET", "POST"]
-)
-@login_required
-def importar():
-
-    if request.method == "POST":
-
-        arquivo = request.files.get(
-            "arquivo"
-        )
-
-        if not arquivo or not arquivo.filename:
-
-            flash(
-                "Selecione um arquivo CSV."
-            )
-
-            return redirect(
-                url_for("importar")
-            )
-
-        db = SessionLocal()
-
-        adicionados = 0
-        ignorados = 0
-
+            if cliente_existente:
+                pagamento.status = "AGUARDANDO"
+            else:
+                return False
+
+    if valor_confirmado is not None:
         try:
-
-            import pandas as pd
-
-            df = pd.read_csv(
-                arquivo,
-                sep=None,
-                engine="python",
-                dtype=str
-            )
-
-            colunas = {
-                str(c).strip().lower(): c
-                for c in df.columns
-            }
-
-            if (
-                "nome" not in colunas
-                or "usuario" not in colunas
-            ):
-
-                flash(
-                    "O CSV precisa ter Nome e Usuario."
-                )
-
-                return redirect(
-                    url_for("importar")
-                )
-
-            for _, row in df.iterrows():
-
-                nome = str(
-                    row[
-                        colunas["nome"]
-                    ]
-                ).strip()
-
-                usuario = str(
-                    row[
-                        colunas["usuario"]
-                    ]
-                ).strip()
-
-                if (
-                    not nome
-                    or not usuario
-                    or nome.lower() == "nan"
-                    or usuario.lower() == "nan"
-                ):
-
-                    ignorados += 1
-                    continue
-
-                existente = (
-                    db.query(Cliente)
-                    .filter(
-                        Cliente.usuario
-                        == usuario
-                    )
-                    .first()
-                )
-
-                if existente:
-
-                    ignorados += 1
-                    continue
-
-                valor = 0.0
-
-                if "valor" in colunas:
-
-                    try:
-
-                        bruto = str(
-                            row[
-                                colunas["valor"]
-                            ]
-                        ).strip()
-
-                        bruto = (
-                            bruto
-                            .replace("R$", "")
-                            .replace(" ", "")
-                        )
-
-                        if (
-                            "," in bruto
-                            and "." in bruto
-                        ):
-
-                            bruto = (
-                                bruto
-                                .replace(".", "")
-                                .replace(",", ".")
-                            )
-
-                        elif "," in bruto:
-
-                            bruto = bruto.replace(
-                                ",",
-                                "."
-                            )
-
-                        valor = float(
-                            bruto
-                        )
-
-                    except Exception:
-
-                        valor = 0.0
-
-                vencimento = None
-
-                if "vencimento" in colunas:
-
-                    try:
-
-                        bruto = row[
-                            colunas["vencimento"]
-                        ]
-
-                        if (
-                            bruto
-                            and str(
-                                bruto
-                            ).lower()
-                            != "nan"
-                        ):
-
-                            vencimento = (
-                                pd.to_datetime(
-                                    bruto,
-                                    dayfirst=True
-                                ).date()
-                            )
-
-                    except Exception:
-
-                        vencimento = None
-
-                db.add(
-                    Cliente(
-                        nome=nome,
-                        usuario=usuario,
-                        valor=valor,
-                        vencimento=vencimento,
-                        status="Pendente"
-                    )
-                )
-
-                adicionados += 1
-
-            db.commit()
-
-            flash(
-                f"Importação concluída: "
-                f"{adicionados} adicionados e "
-                f"{ignorados} ignorados."
-            )
-
-            return redirect(
-                url_for("clientes")
-            )
-
-        except Exception:
-
-            db.rollback()
-
-            flash(
-                "Não foi possível processar o CSV."
-            )
-
-            return redirect(
-                url_for("importar")
-            )
-
-        finally:
-
-            db.close()
-
-    content = r"""
-
-<div class="top">
-
-<div>
-
-<h1>
-    Importar clientes
-</h1>
-
-<div class="subtitle">
-    Cadastre vários clientes de uma única vez.
-</div>
-
-</div>
-
-<a
-    class="btn secondary"
-    href="{{ url_for('clientes') }}"
->
-    ← Clientes
-</a>
-
-</div>
-
-<div class="grid2">
-
-<div class="card">
-
-<h3>
-    📥 Arquivo CSV
-</h3>
-
-<div class="subtitle">
-    Envie sua lista de clientes.
-</div>
-
-<div class="detail-box" style="margin:18px 0;">
-
-<div class="detail-label">
-    Colunas obrigatórias
-</div>
-
-<div class="detail-value">
-    Nome, Usuario
-</div>
-
-<div class="detail-label" style="margin-top:12px;">
-    Colunas opcionais
-</div>
-
-<div class="detail-value">
-    Valor, Vencimento
-</div>
-
-</div>
-
-<form
-    method="post"
-    enctype="multipart/form-data"
->
-
-<input
-    type="file"
-    name="arquivo"
-    accept=".csv"
-    required
->
-
-<button
-    class="btn primary full mt"
-    type="submit"
->
-    📥 Importar clientes
-</button>
-
-</form>
-
-</div>
-
-<div class="card">
-
-<h3>
-    📄 Exemplo
-</h3>
-
-<table style="margin-top:15px;">
-
-<tr>
-<th>Nome</th>
-<th>Usuario</th>
-<th>Valor</th>
-<th>Vencimento</th>
-</tr>
-
-<tr>
-<td>João Silva</td>
-<td>joao123</td>
-<td>25</td>
-<td>10/10/2026</td>
-</tr>
-
-<tr>
-<td>Maria Souza</td>
-<td>maria456</td>
-<td>40</td>
-<td>15/10/2026</td>
-</tr>
-
-</table>
-
-</div>
-
-</div>
-
-"""
-
-    return page(
-        content,
-        "Importar clientes",
-        "importar"
-    )
-
-
-# ============================================================
-# PAGAMENTO PÚBLICO - BUSCAR CLIENTE
-# ============================================================
-
-@app.route(
-    "/pagamento",
-    methods=["GET", "POST"]
-)
-def pagamento():
-
-    db = SessionLocal()
-
-    try:
-
-        busca = ""
-
-        resultados = []
-
-        if request.method == "POST":
-
-            busca = request.form.get(
-                "busca",
-                ""
-            ).strip()
-
-        else:
-
-            busca = request.args.get(
-                "busca",
-                ""
-            ).strip()
-
-        if len(busca) >= 2:
-
-            resultados = (
-                db.query(Cliente)
-                .filter(
-                    Cliente.nome.ilike(
-                        f"%{busca}%"
-                    )
-                )
-                .order_by(
-                    Cliente.nome.asc()
-                )
-                .limit(20)
-                .all()
-            )
-
-        content = r"""
-
-<!doctype html>
-
-<html lang="pt-BR">
-
-<head>
-
-<meta charset="utf-8">
-
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
->
-
-<title>
-    Pagamento Pix
-</title>
-
-<style>
-
-body {
-    margin:0;
-    min-height:100vh;
-    background:
-        linear-gradient(
-            135deg,
-            #060910,
-            #0b1220
-        );
-    color:white;
-    font-family:
-        system-ui,
-        sans-serif;
-    padding:20px;
-}
-
-.box {
-    width:min(600px,100%);
-    margin:30px auto;
-    background:#111827;
-    border:1px solid #243044;
-    border-radius:20px;
-    padding:25px;
-}
-
-h1 {
-    margin-top:0;
-}
-
-.sub {
-    color:#94a3b8;
-    font-size:13px;
-    margin-bottom:20px;
-}
-
-input {
-    width:100%;
-    box-sizing:border-box;
-    padding:14px;
-    border-radius:10px;
-    border:1px solid #243044;
-    background:#0b1220;
-    color:white;
-    margin-bottom:10px;
-}
-
-button,
-.btn {
-    display:block;
-    width:100%;
-    padding:13px;
-    border:0;
-    border-radius:10px;
-    background:#2563eb;
-    color:white;
-    font-weight:800;
-    text-align:center;
-    cursor:pointer;
-}
-
-.cliente {
-    display:block;
-    padding:15px;
-    margin-top:10px;
-    background:#0b1220;
-    border:1px solid #243044;
-    border-radius:12px;
-}
-
-.cliente:hover {
-    border-color:#3b82f6;
-}
-
-.nome {
-    font-weight:800;
-}
-
-.usuario {
-    color:#94a3b8;
-    font-size:12px;
-    margin-top:3px;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="box">
-
-<h1>
-    💳 Pagamento Pix
-</h1>
-
-<div class="sub">
-    Digite seu primeiro nome para localizar seu cadastro.
-</div>
-
-<form method="post">
-
-<input
-    name="busca"
-    value="{{ busca }}"
-    minlength="2"
-    required
-    placeholder="Digite seu nome..."
-    autofocus
->
-
-<button>
-    🔎 Procurar
-</button>
-
-</form>
-
-{% if resultados %}
-
-<div style="margin-top:20px;">
-
-<strong>
-    Selecione seu cadastro:
-</strong>
-
-{% for cliente in resultados %}
-
-<a
-    class="cliente"
-    href="{{ url_for(
-        'pagamento_valor',
-        cliente_id=cliente.id
-    ) }}"
->
-
-<div class="nome">
-    {{ cliente.nome }}
-</div>
-
-<div class="usuario">
-    Usuário: {{ cliente.usuario }}
-</div>
-
-</a>
-
-{% endfor %}
-
-</div>
-
-{% elif busca %}
-
-<div
-    style="
-        margin-top:20px;
-        color:#facc15;
-    "
->
-    Nenhum cliente encontrado.
-</div>
-
-{% endif %}
-
-</div>
-
-</body>
-
-</html>
-
-"""
-
-        return render_template_string(
-            content,
-            busca=busca,
-            resultados=resultados
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# PAGAMENTO - INFORMAR VALOR
-# ============================================================
-
-@app.route(
-    "/pagamento/<int:cliente_id>",
-    methods=["GET", "POST"]
-)
-def pagamento_valor(
-    cliente_id
-):
-
-    db = SessionLocal()
-
-    try:
-
-        cliente = (
-            db.query(Cliente)
-            .filter(
-                Cliente.id == cliente_id
-            )
-            .first()
-        )
-
-        if not cliente:
-
-            return (
-                "Cliente não encontrado.",
-                404
-            )
-
-        if request.method == "POST":
-
-            valor = valor_float(
-                request.form.get(
-                    "valor",
-                    ""
-                )
-            )
-
-            if valor is None:
-
-                flash(
-                    "Digite um valor válido."
-                )
-
-                return redirect(
-                    url_for(
-                        "pagamento_valor",
-                        cliente_id=cliente_id
-                    )
-                )
-
-            if valor <= 0:
-
-                flash(
-                    "O valor precisa ser maior que zero."
-                )
-
-                return redirect(
-                    url_for(
-                        "pagamento_valor",
-                        cliente_id=cliente_id
-                    )
-                )
-
-            referencia = (
-                "IPTV-"
-                + secrets.token_hex(16).upper()
-            )
-
-            pagamento = Pagamento(
-                referencia=referencia,
-                cliente_id=cliente.id,
-                cliente_nome=cliente.nome,
-                cliente_usuario=cliente.usuario,
-                valor=valor,
-                status="CONFIRMANDO"
-            )
-
-            db.add(pagamento)
-            db.commit()
-
-            return render_template_string(
-                CONFIRMAR_PAGAMENTO,
-                pagamento=pagamento
-            )
-
-        return render_template_string(
-            PAGAMENTO_VALOR,
-            cliente=cliente
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# TEMPLATE VALOR
-# ============================================================
-
-PAGAMENTO_VALOR = r"""
-
-<!doctype html>
-
-<html lang="pt-BR">
-
-<head>
-
-<meta charset="utf-8">
-
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
->
-
-<title>
-    Valor do Pix
-</title>
-
-<style>
-
-body {
-    margin:0;
-    min-height:100vh;
-    background:
-        linear-gradient(
-            135deg,
-            #060910,
-            #0b1220
-        );
-    color:white;
-    font-family:system-ui,sans-serif;
-    padding:20px;
-}
-
-.box {
-    width:min(500px,100%);
-    margin:40px auto;
-    background:#111827;
-    border:1px solid #243044;
-    border-radius:20px;
-    padding:25px;
-}
-
-input {
-    width:100%;
-    box-sizing:border-box;
-    padding:15px;
-    background:#0b1220;
-    color:white;
-    border:1px solid #243044;
-    border-radius:10px;
-    font-size:18px;
-}
-
-button {
-    width:100%;
-    padding:14px;
-    border:0;
-    border-radius:10px;
-    background:#2563eb;
-    color:white;
-    font-weight:800;
-    margin-top:15px;
-}
-
-.muted {
-    color:#94a3b8;
-    font-size:13px;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="box">
-
-<h1>
-    💳 Pagamento Pix
-</h1>
-
-<div class="muted">
-    Cliente: <strong>{{ cliente.nome }}</strong>
-</div>
-
-<div class="muted" style="margin-top:5px;">
-    Usuário: {{ cliente.usuario }}
-</div>
-
-<form method="post" style="margin-top:25px;">
-
-<label>
-    Quanto você vai pagar?
-</label>
-
-<input
-    type="number"
-    name="valor"
-    step="0.01"
-    min="0.01"
-    required
-    value="{{ cliente.valor or '' }}"
-    placeholder="Ex.: 25,00"
->
-
-<button>
-    Continuar
-</button>
-
-</form>
-
-</div>
-
-</body>
-
-</html>
-
-"""
-
-
-# ============================================================
-# CONFIRMAÇÃO
-# ============================================================
-
-CONFIRMAR_PAGAMENTO = r"""
-
-<!doctype html>
-
-<html lang="pt-BR">
-
-<head>
-
-<meta charset="utf-8">
-
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
->
-
-<title>
-    Confirmar pagamento
-</title>
-
-<style>
-
-body {
-    margin:0;
-    min-height:100vh;
-    background:
-        linear-gradient(
-            135deg,
-            #060910,
-            #0b1220
-        );
-    color:white;
-    font-family:system-ui,sans-serif;
-    padding:20px;
-}
-
-.box {
-    width:min(500px,100%);
-    margin:40px auto;
-    background:#111827;
-    border:1px solid #243044;
-    border-radius:20px;
-    padding:25px;
-    text-align:center;
-}
-
-.valor {
-    font-size:38px;
-    font-weight:900;
-    color:#60a5fa;
-    margin:20px 0;
-}
-
-button {
-    width:100%;
-    padding:14px;
-    border:0;
-    border-radius:10px;
-    color:white;
-    font-weight:800;
-    margin-top:10px;
-}
-
-.sim {
-    background:#16a34a;
-}
-
-.nao {
-    background:#374151;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="box">
-
-<h1>
-    Confirmar pagamento
-</h1>
-
-<p>
-    Cliente:
-    <strong>
-        {{ pagamento.cliente_nome }}
-    </strong>
-</p>
-
-<p>
-    Usuário:
-    {{ pagamento.cliente_usuario }}
-</p>
-
-<div class="valor">
-    R$ {{ "%.2f"|format(pagamento.valor)|replace(".", ",") }}
-</div>
-
-<p>
-    Você confirma que deseja gerar este Pix?
-</p>
-
-<form
-    method="post"
-    action="{{ url_for(
-        'criar_pagamento_pix',
-        referencia=pagamento.referencia
-    ) }}"
->
-
-<button class="sim">
-    ✅ SIM, GERAR PIX
-</button>
-
-</form>
-
-<a
-    href="{{ url_for('pagamento') }}"
-    style="
-        text-decoration:none;
-        display:block;
-    "
->
-
-<button class="nao">
-    ❌ NÃO
-</button>
-
-</a>
-
-</div>
-
-</body>
-
-</html>
-
-"""
-
-
-# ============================================================
-# CRIAR PIX APÓS SIM
-# ============================================================
-
-@app.post(
-    "/pagamento/criar/<referencia>"
-)
-def criar_pagamento_pix(
-    referencia
-):
-
-    db = SessionLocal()
-
-    try:
-
-        pagamento = (
-            db.query(Pagamento)
-            .filter(
-                Pagamento.referencia
-                == referencia
-            )
-            .first()
-        )
-
-        if not pagamento:
-
-            return (
-                "Pagamento não encontrado.",
-                404
-            )
-
-        if pagamento.pagbank_order_id:
-
-            return redirect(
-                url_for(
-                    "pix",
-                    referencia=referencia
-                )
-            )
-
-        try:
-
-            criar_pix_pagbank(
-                pagamento
-            )
-
-            db.commit()
-
-        except Exception as error:
-
-            db.rollback()
-
-            return (
-                "Não foi possível criar o Pix: "
-                + str(error),
-                500
-            )
-
-        return redirect(
-            url_for(
-                "pix",
-                referencia=referencia
-            )
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# PÁGINA PIX
-# ============================================================
-
-@app.route(
-    "/pix/<referencia>"
-)
-def pix(
-    referencia
-):
-
-    db = SessionLocal()
-
-    try:
-
-        pagamento = (
-            db.query(Pagamento)
-            .filter(
-                Pagamento.referencia
-                == referencia
-            )
-            .first()
-        )
-
-        if not pagamento:
-
-            return (
-                "Pagamento não encontrado.",
-                404
-            )
-
-        content = r"""
-
-<!doctype html>
-
-<html lang="pt-BR">
-
-<head>
-
-<meta charset="utf-8">
-
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
->
-
-<title>
-    Pagar com Pix
-</title>
-
-<style>
-
-body {
-    margin:0;
-    min-height:100vh;
-    background:
-        linear-gradient(
-            135deg,
-            #060910,
-            #0b1220
-        );
-    color:white;
-    font-family:system-ui,sans-serif;
-    padding:20px;
-}
-
-.box {
-    width:min(550px,100%);
-    margin:25px auto;
-    background:#111827;
-    border:1px solid #243044;
-    border-radius:20px;
-    padding:25px;
-    text-align:center;
-}
-
-.qr {
-    width:280px;
-    max-width:100%;
-    background:white;
-    padding:10px;
-    border-radius:15px;
-}
-
-.code {
-    width:100%;
-    min-height:110px;
-    box-sizing:border-box;
-    resize:vertical;
-    background:#0b1220;
-    border:1px solid #243044;
-    color:white;
-    border-radius:10px;
-    padding:12px;
-    font-size:11px;
-}
-
-button {
-    width:100%;
-    padding:13px;
-    border:0;
-    border-radius:10px;
-    background:#2563eb;
-    color:white;
-    font-weight:800;
-    margin-top:10px;
-}
-
-.wait {
-    margin-top:20px;
-    color:#93c5fd;
-}
-
-.success {
-    padding:20px;
-    border-radius:15px;
-    background:rgba(34,197,94,.10);
-    border:1px solid rgba(34,197,94,.30);
-    color:#86efac;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="box">
-
-<h1>
-    💳 Pagamento Pix
-</h1>
-
-<p>
-    {{ pagamento.cliente_nome }}
-</p>
-
-<h2>
-    R$ {{ "%.2f"|format(pagamento.valor)|replace(".", ",") }}
-</h2>
-
-<div id="status">
-
-{% if pagamento.status == "PAID" %}
-
-<div class="success">
-    ✅ Pagamento confirmado!
-</div>
-
-{% else %}
-
-<img
-    class="qr"
-    src="{{ url_for(
-        'pix_qrcode',
-        referencia=pagamento.referencia
-    ) }}"
->
-
-<h3>
-    Escaneie o QR Code
-</h3>
-
-<textarea
-    id="pix"
-    class="code"
-    readonly
->{{ pagamento.qr_code }}</textarea>
-
-<button
-    onclick="
-        navigator.clipboard.writeText(
-            document.getElementById('pix').value
-        );
-        this.innerText='✓ Copiado';
-    "
->
-    📋 Copiar Pix
-</button>
-
-<div class="wait">
-    ⏳ Aguardando confirmação do pagamento...
-</div>
-
-{% endif %}
-
-</div>
-
-</div>
-
-<script>
-
-setInterval(async function(){
-
-    try {
-
-        const response =
-            await fetch(
-                "{{ url_for(
-                    'status_pagamento',
-                    referencia=pagamento.referencia
-                ) }}"
-            );
-
-        const data =
-            await response.json();
-
-        if (
-            data.status === "PAID"
-        ) {
-
-            location.reload();
-
-        }
-
-    } catch(error) {
-
-    }
-
-}, 5000);
-
-</script>
-
-</body>
-
-</html>
-
-"""
-
-        return render_template_string(
-            content,
-            pagamento=pagamento
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# QR CODE PROXY
-# ============================================================
-
-@app.route(
-    "/pix/<referencia>/qrcode.png"
-)
-def pix_qrcode(
-    referencia
-):
-
-    db = SessionLocal()
-
-    try:
-
-        pagamento = (
-            db.query(Pagamento)
-            .filter(
-                Pagamento.referencia
-                == referencia
-            )
-            .first()
-        )
-
-        if not pagamento:
-
-            return (
-                "Não encontrado.",
-                404
-            )
-
-        if not pagamento.qr_code_url:
-
-            return (
-                "QR Code não disponível.",
-                404
-            )
-
-        resposta = requests.get(
-            pagamento.qr_code_url,
-            headers=pagbank_headers(),
-            timeout=PAGBANK_TIMEOUT
-        )
-
-        if resposta.status_code != 200:
-
-            return (
-                "QR Code indisponível.",
-                502
-            )
-
-        return Response(
-            resposta.content,
-            mimetype="image/png",
-            headers={
-                "Cache-Control":
-                    "no-store"
-            }
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# STATUS PÚBLICO
-# ============================================================
-
-@app.get(
-    "/pagamento/status/<referencia>"
-)
-def status_pagamento(
-    referencia
-):
-
-    db = SessionLocal()
-
-    try:
-
-        pagamento = (
-            db.query(Pagamento)
-            .filter(
-                Pagamento.referencia
-                == referencia
-            )
-            .first()
-        )
-
-        if not pagamento:
-
-            return jsonify({
-                "status": "NOT_FOUND"
-            }), 404
-
-        return jsonify({
-
-            "status":
-                pagamento.status,
-
-            "pago":
-                pagamento.status == "PAID"
-
-        })
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# PROCESSAR PAGAMENTO CONFIRMADO
-# ============================================================
-
-def processar_pagamento_confirmado(
-    db,
-    pagamento,
-    dados_pedido
-):
-
-    charges = (
-        dados_pedido.get(
-            "charges"
-        )
-        or []
-    )
-
-    if not charges:
-
-        pagamento.status = "ERRO"
+            valor_confirmado = int(valor_confirmado)
+        except (TypeError, ValueError):
+            valor_confirmado = None
+
+    if valor_confirmado is not None and valor_confirmado != pagamento.valor_centavos:
+        pagamento.status = "ERRO_VALOR"
         pagamento.observacao = (
-            "Pedido sem cobrança."
+            f"Valor PagBank divergente. Esperado {pagamento.valor_centavos}, "
+            f"recebido {valor_confirmado}."
         )
-
         return False
-
-    charge = charges[0]
-
-    status = (
-        charge.get(
-            "status"
-        )
-        or ""
-    ).upper()
-
-    amount = (
-        charge.get(
-            "amount"
-        )
-        or {}
-    )
-
-    valor_pago_centavos = (
-        amount.get("value")
-    )
-
-    valor_esperado = (
-        valor_centavos(
-            pagamento.valor
-        )
-    )
-
-    if status != "PAID":
-
-        if status in (
-            "DECLINED",
-            "CANCELED",
-            "CANCELLED"
-        ):
-
-            pagamento.status = "CANCELADO"
-
-        return False
-
-    try:
-
-        valor_pago_centavos = int(
-            valor_pago_centavos
-        )
-
-    except Exception:
-
-        pagamento.status = "ERRO"
-
-        pagamento.observacao = (
-            "Valor retornado pelo PagBank inválido."
-        )
-
-        return False
-
-    if (
-        valor_pago_centavos
-        != valor_esperado
-    ):
-
-        pagamento.status = "ERRO"
-
-        pagamento.observacao = (
-            "Valor pago diferente do valor da cobrança."
-        )
-
-        return False
-
-    pagamento.status = "PAID"
-
-    pagamento.pago_em = datetime.utcnow()
-
-    pagamento.webhook_recebido_em = (
-        datetime.utcnow()
-    )
-
-    pagamento.vencimento_apos_pagamento = (
-        proximo_dia_10()
-    )
 
     cliente = None
 
     if pagamento.cliente_id:
-
         cliente = (
             db.query(Cliente)
-            .filter(
-                Cliente.id
-                == pagamento.cliente_id
-            )
+            .filter(Cliente.id == pagamento.cliente_id)
             .first()
         )
 
-    if not cliente:
-
-        if pagamento.cliente_usuario:
-
-            cliente = (
-                db.query(Cliente)
-                .filter(
-                    Cliente.usuario
-                    == pagamento.cliente_usuario
-                )
-                .first()
-            )
+    # Fallback por usuário caso o vínculo por ID não exista mais.
+    if not cliente and pagamento.usuario_cliente:
+        cliente = (
+            db.query(Cliente)
+            .filter(Cliente.usuario == pagamento.usuario_cliente)
+            .first()
+        )
 
     if cliente:
+        agora = agora_utc()
+        novo_vencimento = proximo_vencimento()
 
         cliente.status = "Pago"
+        cliente.valor = float(pagamento.valor)
+        cliente.data_pagamento = agora
+        cliente.vencimento = novo_vencimento
 
-        cliente.valor = (
-            pagamento.valor
+        pagamento.cliente_id = cliente.id
+        pagamento.nome_cliente = cliente.nome
+        pagamento.usuario_cliente = cliente.usuario
+        pagamento.status = "PAGO"
+        pagamento.pago_em = pagamento.pago_em or agora
+        pagamento.vencimento_gerado = novo_vencimento
+        pagamento.observacao = "Pagamento confirmado automaticamente pelo PagBank e cliente renovado."
+        return True
+
+    pagamento.status = "RECEBIDO_SEM_VINCULO"
+    pagamento.pago_em = pagamento.pago_em or agora_utc()
+    pagamento.observacao = (
+        "Pagamento recebido pelo PagBank, mas o cliente não foi encontrado "
+        "para atualização automática."
+    )
+    return False
+
+
+# ============================================================
+# AUTENTICAÇÃO ADMINISTRATIVA
+# ============================================================
+
+def admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get("admin_logado"):
+            return redirect(url_for("admin_login"))
+        return view(*args, **kwargs)
+    return wrapped
+
+
+# ============================================================
+# HTML
+# ============================================================
+
+BASE_CSS = """
+<style>
+* { box-sizing: border-box; }
+body {
+    background: #07111f;
+    color: #f8fafc;
+    font-family: Arial, sans-serif;
+    margin: 0;
+}
+.page {
+    min-height: 100vh;
+    padding: 28px 16px 50px;
+}
+.box {
+    width: min(560px, 100%);
+    margin: 0 auto;
+}
+.brand {
+    text-align: center;
+    margin-bottom: 22px;
+}
+.brand .icon {
+    font-size: 48px;
+}
+.brand h1 {
+    margin: 8px 0 4px;
+    font-size: 30px;
+}
+.brand p {
+    color: #94a3b8;
+    margin: 0;
+}
+.card {
+    background: #0d1b2d;
+    border: 1px solid #1e334d;
+    border-radius: 20px;
+    padding: 22px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.25);
+    margin-bottom: 16px;
+}
+label {
+    display:block;
+    margin: 0 0 7px;
+    color:#cbd5e1;
+    font-weight:700;
+}
+input, select {
+    width:100%;
+    padding:14px;
+    border-radius:12px;
+    border:1px solid #29425f;
+    background:#081522;
+    color:#fff;
+    outline:none;
+    margin-bottom:14px;
+}
+button, .btn {
+    width:100%;
+    border:0;
+    border-radius:12px;
+    padding:14px;
+    background:#16a34a;
+    color:#fff;
+    font-size:16px;
+    font-weight:800;
+    cursor:pointer;
+    text-decoration:none;
+    display:inline-block;
+    text-align:center;
+}
+.btn-secondary {
+    background:#172a40;
+}
+.btn-danger {
+    background:#b91c1c;
+}
+.client {
+    display:block;
+    padding:14px;
+    margin:8px 0;
+    border:1px solid #29425f;
+    border-radius:13px;
+    background:#091827;
+    color:#fff;
+    text-decoration:none;
+}
+.client:hover {
+    border-color:#22c55e;
+}
+.client strong { display:block; font-size:16px; }
+.client span { color:#94a3b8; font-size:13px; }
+.pix {
+    text-align:center;
+}
+.pix img {
+    width:260px;
+    max-width:100%;
+    background:#fff;
+    padding:10px;
+    border-radius:16px;
+}
+.copybox {
+    word-break:break-all;
+    background:#07111f;
+    border:1px solid #29425f;
+    border-radius:12px;
+    padding:13px;
+    color:#cbd5e1;
+    font-size:13px;
+    margin:12px 0;
+}
+.status {
+    text-align:center;
+    padding:12px;
+    border-radius:12px;
+    background:#172a40;
+    margin-top:14px;
+}
+.ok { color:#4ade80; }
+.warn { color:#facc15; }
+.err { color:#f87171; }
+.small {
+    color:#94a3b8;
+    font-size:13px;
+    line-height:1.5;
+}
+table {
+    width:100%;
+    border-collapse:collapse;
+}
+th, td {
+    padding:10px;
+    border-bottom:1px solid #20364e;
+    text-align:left;
+}
+@media(max-width:600px) {
+    .page { padding-top:18px; }
+    .card { padding:17px; }
+    .brand h1 { font-size:25px; }
+}
+</style>
+"""
+
+
+# ============================================================
+# PÁGINA PÚBLICA
+# ============================================================
+
+@app.route("/", methods=["GET"])
+@app.route("/pagar", methods=["GET"])
+def pagar():
+    busca = request.args.get("busca", "").strip()
+    clientes = []
+
+    if len(busca) >= 2:
+        db = SessionLocal()
+        try:
+            termo = f"%{busca}%"
+            clientes = (
+                db.query(Cliente)
+                .filter(Cliente.nome.ilike(termo))
+                .order_by(Cliente.nome.asc())
+                .limit(20)
+                .all()
+            )
+        finally:
+            db.close()
+
+    return render_template_string(
+        BASE_CSS + """
+        <div class="page">
+          <div class="box">
+            <div class="brand">
+              <div class="icon">📺</div>
+              <h1>Renovação IPTV</h1>
+              <p>Faça sua renovação de forma rápida e segura pelo PIX.</p>
+            </div>
+
+            <div class="card">
+              <form method="get" action="{{ url_for('pagar') }}">
+                <label>1. Pesquise seu nome</label>
+                <input
+                    name="busca"
+                    value="{{ busca }}"
+                    placeholder="Digite seu primeiro nome"
+                    autocomplete="off"
+                >
+                <button type="submit">🔎 Pesquisar cadastro</button>
+              </form>
+            </div>
+
+            {% if busca and not clientes %}
+            <div class="card">
+              <div class="warn">Nenhum cadastro encontrado.</div>
+              <p class="small">
+                Confira a forma como seu nome foi cadastrado e tente novamente.
+              </p>
+            </div>
+            {% endif %}
+
+            {% if clientes %}
+            <div class="card">
+              <h3>2. Selecione seu cadastro</h3>
+              <p class="small">Escolha somente o seu próprio cadastro.</p>
+
+              {% for cliente in clientes %}
+              <a class="client"
+                 href="{{ url_for('selecionar_cliente', cliente_id=cliente.id) }}">
+                <strong>{{ cliente.nome }}</strong>
+                <span>Usuário: {{ cliente.usuario }}</span>
+              </a>
+              {% endfor %}
+            </div>
+            {% endif %}
+
+            <div class="card">
+              <div class="small">
+                🔒 O pagamento é processado pelo PagBank.<br>
+                🔒 Seus dados administrativos não ficam disponíveis nesta página.
+              </div>
+            </div>
+          </div>
+        </div>
+        """,
+        busca=busca,
+        clientes=clientes,
+    )
+
+
+@app.route("/selecionar/<int:cliente_id>")
+def selecionar_cliente(cliente_id):
+    db = SessionLocal()
+    try:
+        cliente = db.query(Cliente).filter(Cliente.id == cliente_id).first()
+        if not cliente:
+            flash("Cliente não encontrado.")
+            return redirect(url_for("pagar"))
+
+        session["cliente_pagamento_id"] = cliente.id
+        session["cliente_pagamento_nome"] = cliente.nome
+        session["cliente_pagamento_usuario"] = cliente.usuario
+
+        valor_padrao = float(cliente.valor or 0)
+    finally:
+        db.close()
+
+    return render_template_string(
+        BASE_CSS + """
+        <div class="page">
+          <div class="box">
+            <div class="brand">
+              <div class="icon">💳</div>
+              <h1>Renovação IPTV</h1>
+              <p>Confirme os dados para gerar seu PIX.</p>
+            </div>
+
+            <div class="card">
+              <h3>Cadastro selecionado</h3>
+              <p><strong>{{ nome }}</strong></p>
+              <p class="small">Usuário: {{ usuario }}</p>
+            </div>
+
+            <div class="card">
+              <form method="post" action="{{ url_for('confirmar_pagamento') }}">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+
+                <label>3. Valor da renovação</label>
+                <input
+                    type="text"
+                    name="valor"
+                    value="{{ valor }}"
+                    inputmode="decimal"
+                    placeholder="Ex.: 25,00"
+                    required
+                >
+
+                <button type="submit">
+                  Continuar para confirmar PIX
+                </button>
+              </form>
+
+              <div style="height:10px"></div>
+              <a class="btn btn-secondary" href="{{ url_for('pagar') }}">
+                Voltar
+              </a>
+            </div>
+          </div>
+        </div>
+        """,
+        nome=session.get("cliente_pagamento_nome", ""),
+        usuario=session.get("cliente_pagamento_usuario", ""),
+        valor=f"{valor_padrao:.2f}".replace(".", ","),
+        csrf=csrf_token(),
+    )
+
+
+@app.route("/confirmar-pagamento", methods=["POST"])
+def confirmar_pagamento():
+    if not validar_csrf(request.form.get("csrf")):
+        return "Solicitação inválida.", 400
+
+    cliente_id = session.get("cliente_pagamento_id")
+    if not cliente_id:
+        return redirect(url_for("pagar"))
+
+    try:
+        centavos = parse_centavos(request.form.get("valor"))
+    except ValueError as exc:
+        return render_template_string(
+            BASE_CSS + """
+            <div class="page"><div class="box">
+              <div class="brand">
+                <div class="icon">⚠️</div>
+                <h1>Valor inválido</h1>
+              </div>
+              <div class="card">
+                <p class="err">{{ erro }}</p>
+                <a class="btn btn-secondary" href="{{ url_for('selecionar_cliente', cliente_id=cliente_id) }}">
+                  Voltar
+                </a>
+              </div>
+            </div></div>
+            """,
+            erro=str(exc),
+            cliente_id=cliente_id,
+        ), 400
+
+    db = SessionLocal()
+    try:
+        cliente = db.query(Cliente).filter(Cliente.id == cliente_id).first()
+
+        if not cliente:
+            return redirect(url_for("pagar"))
+
+        referencia = "IPTV-" + secrets.token_urlsafe(18)
+        idempotency = str(uuid.uuid4())
+
+        pagamento = Pagamento(
+            referencia=referencia,
+            cliente_id=cliente.id,
+            nome_cliente=cliente.nome,
+            usuario_cliente=cliente.usuario,
+            valor=centavos / 100,
+            valor_centavos=centavos,
+            status="CRIANDO",
+            metodo="PIX",
+            idempotency_key=idempotency,
+            criado_em=agora_utc(),
         )
 
-        cliente.data_pagamento = (
-            datetime.utcnow()
+        db.add(pagamento)
+        db.commit()
+        pagamento_id = pagamento.id
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        pagamento = db.query(Pagamento).filter(Pagamento.id == pagamento_id).first()
+
+        try:
+            criar_pedido_pix(pagamento)
+        except Exception as exc:
+            pagamento.status = "ERRO_CRIACAO"
+            pagamento.observacao = str(exc)[:1000]
+            db.commit()
+
+            return render_template_string(
+                BASE_CSS + """
+                <div class="page"><div class="box">
+                  <div class="brand">
+                    <div class="icon">⚠️</div>
+                    <h1>Não foi possível gerar o PIX</h1>
+                  </div>
+                  <div class="card">
+                    <p class="err">
+                      A cobrança não foi criada. Tente novamente em alguns instantes.
+                    </p>
+                    <a class="btn btn-secondary" href="{{ url_for('pagar') }}">
+                      Voltar
+                    </a>
+                  </div>
+                </div></div>
+                """,
+            ), 502
+
+        return redirect(url_for("pix", referencia=pagamento.referencia))
+    finally:
+        db.close()
+
+
+@app.route("/pix/<referencia>")
+def pix(referencia):
+    db = SessionLocal()
+    try:
+        pagamento = (
+            db.query(Pagamento)
+            .filter(Pagamento.referencia == referencia)
+            .first()
         )
 
-        cliente.vencimento = (
-            proximo_dia_10()
+        if not pagamento:
+            return redirect(url_for("pagar"))
+
+        return render_template_string(
+            BASE_CSS + """
+            <div class="page">
+              <div class="box">
+                <div class="brand">
+                  <div class="icon">📺</div>
+                  <h1>Renovação IPTV</h1>
+                  <p>Seu PIX foi gerado.</p>
+                </div>
+
+                <div class="card pix">
+                  <h2>{{ valor }}</h2>
+                  <p><strong>{{ nome }}</strong></p>
+
+                  {% if pagamento.qr_code_url %}
+                    <img src="{{ url_for('qrcode_proxy', referencia=pagamento.referencia) }}"
+                         alt="QR Code PIX">
+                  {% endif %}
+
+                  <p class="small">
+                    Escaneie o QR Code no aplicativo do seu banco.
+                  </p>
+
+                  <h4>PIX Copia e Cola</h4>
+                  <div class="copybox" id="pixcode">{{ pagamento.qr_code_text }}</div>
+
+                  <button type="button" onclick="copiarPix()">
+                    📋 Copiar PIX
+                  </button>
+
+                  <div id="status" class="status">
+                    ⏳ Aguardando confirmação do pagamento...
+                  </div>
+
+                  <p class="small">
+                    Após o pagamento, a confirmação é feita automaticamente pelo PagBank.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <script>
+            function copiarPix() {
+              const texto = document.getElementById("pixcode").innerText;
+              navigator.clipboard.writeText(texto).then(() => {
+                alert("PIX copiado!");
+              });
+            }
+
+            async function consultar() {
+              try {
+                const r = await fetch(
+                  "{{ url_for('status_pagamento', referencia=pagamento.referencia) }}",
+                  {cache: "no-store"}
+                );
+                const data = await r.json();
+
+                const box = document.getElementById("status");
+
+                if (data.status === "PAGO") {
+                  box.innerHTML =
+                    '<span class="ok">✅ Pagamento confirmado!</span><br>' +
+                    'Seu vencimento foi atualizado para ' +
+                    data.vencimento + '.';
+                  return;
+                }
+
+                if (data.status === "RECEBIDO_SEM_VINCULO") {
+                  box.innerHTML =
+                    '<span class="warn">⚠️ Pagamento recebido.</span><br>' +
+                    'A confirmação foi recebida e será verificada.';
+                  return;
+                }
+
+                if (data.status === "EXPIRADO") {
+                  box.innerHTML =
+                    '<span class="err">PIX expirado.</span><br>' +
+                    'Gere uma nova cobrança.';
+                  return;
+                }
+
+                setTimeout(consultar, 5000);
+              } catch (e) {
+                setTimeout(consultar, 7000);
+              }
+            }
+
+            consultar();
+            </script>
+            """,
+            pagamento=pagamento,
+            nome=pagamento.nome_cliente,
+            valor=dinheiro(pagamento.valor),
+        )
+    finally:
+        db.close()
+
+
+@app.route("/qrcode/<referencia>.png")
+def qrcode_proxy(referencia):
+    db = SessionLocal()
+    try:
+        pagamento = (
+            db.query(Pagamento)
+            .filter(Pagamento.referencia == referencia)
+            .first()
+        )
+        if not pagamento or not pagamento.qr_code_url:
+            return "QR Code não encontrado.", 404
+
+        resposta = requests.get(
+            pagamento.qr_code_url,
+            headers={"Authorization": f"Bearer {PAGBANK_TOKEN}"},
+            timeout=PAGBANK_TIMEOUT,
         )
 
-        pagamento.cliente_id = (
-            cliente.id
+        if resposta.status_code != 200:
+            return "QR Code indisponível.", 502
+
+        return resposta.content, 200, {
+            "Content-Type": resposta.headers.get("Content-Type", "image/png"),
+            "Cache-Control": "no-store",
+        }
+    finally:
+        db.close()
+
+
+@app.route("/status/<referencia>")
+def status_pagamento(referencia):
+    db = SessionLocal()
+    try:
+        pagamento = (
+            db.query(Pagamento)
+            .filter(Pagamento.referencia == referencia)
+            .first()
         )
 
-        pagamento.observacao = (
-            "Pagamento confirmado e "
-            "cliente atualizado automaticamente."
+        if not pagamento:
+            return jsonify({"status": "NAO_ENCONTRADO"}), 404
+
+        # O webhook é o mecanismo principal. Esta consulta ao PagBank é um
+        # mecanismo de segurança: se o webhook estiver atrasado, bloqueado ou
+        # ainda não tiver chegado, a própria página consegue confirmar o PIX.
+        if (
+            pagamento.status not in ("PAGO", "RECEBIDO_SEM_VINCULO", "CANCELADO", "EXPIRADO", "ERRO_VALOR")
+            and pagamento.pagbank_order_id
+        ):
+            try:
+                pedido = consultar_pedido(pagamento.pagbank_order_id)
+                if pedido:
+                    dados = extrair_dados_pagbank(pedido)
+                    status_oficial = str(dados.get("status") or "").upper()
+
+                    if status_oficial == "PAID":
+                        processar_pagamento_pago(
+                            db,
+                            pagamento,
+                            dados.get("valor"),
+                        )
+                        db.commit()
+                    elif status_oficial in ("CANCELED", "CANCELLED", "DECLINED"):
+                        pagamento.status = "CANCELADO"
+                        db.commit()
+                    elif status_oficial == "WAITING":
+                        pagamento.status = "AGUARDANDO"
+                        db.commit()
+            except Exception as exc:
+                # O status da tela continua sendo o último estado conhecido.
+                # O webhook permanece responsável pela confirmação oficial.
+                print(f"⚠️ Consulta automática PagBank falhou: {exc}")
+                db.rollback()
+
+        vencimento = (
+            pagamento.vencimento_gerado.strftime("%d/%m/%Y")
+            if pagamento.vencimento_gerado
+            else ""
         )
 
-    else:
-
-        pagamento.status = (
-            "PAID_UNLINKED"
-        )
-
-        pagamento.observacao = (
-            "Pagamento recebido, mas "
-            "cliente não foi localizado."
-        )
-
-    return True
+        return jsonify({
+            "status": pagamento.status,
+            "vencimento": vencimento,
+            "renovado": pagamento.status == "PAGO" and bool(pagamento.vencimento_gerado),
+        })
+    finally:
+        db.close()
 
 
 # ============================================================
 # WEBHOOK PAGBANK
 # ============================================================
 
-@app.post(
-    "/webhooks/pagbank"
-)
+@app.route("/webhook/pagbank", methods=["POST"])
 def webhook_pagbank():
-
-    corpo = request.get_data(
-        cache=False
-    )
-
-    assinatura = request.headers.get(
-        "x-payload-signature"
-    )
-
-    if not assinatura:
-
-        return jsonify({
-            "error":
-                "assinatura ausente"
-        }), 401
-
-    db = SessionLocal()
+    raw_body = request.get_data(cache=True, as_text=False)
+    assinatura = request.headers.get("x-payload-signature", "")
 
     try:
+        assinatura_valida = verificar_assinatura_webhook(raw_body, assinatura)
 
-        if not PAGBANK_TOKEN:
-
-            return jsonify({
-                "error":
-                    "PagBank não configurado"
-            }), 500
-
-        try:
-
-            chave = (
-                obter_chave_publica_pagbank(
-                    db
-                )
-            )
-
-        except Exception:
-
-            db.rollback()
-
-            return jsonify({
-                "error":
-                    "chave pública indisponível"
-            }), 500
-
-        autenticado = (
-            validar_webhook_pagbank(
-                corpo,
+        # Se a chave armazenada tiver sido rotacionada pelo PagBank, busca a
+        # chave pública atual uma segunda vez antes de rejeitar a notificação.
+        if not assinatura_valida:
+            assinatura_valida = verificar_assinatura_webhook(
+                raw_body,
                 assinatura,
-                chave
-            )
-        )
-
-        if not autenticado:
-
-            return jsonify({
-                "error":
-                    "assinatura inválida"
-            }), 401
-
-        try:
-
-            payload = (
-                request.get_json(
-                    force=True
-                )
+                forcar=True,
             )
 
-        except Exception:
+        if not assinatura_valida:
+            return "Assinatura inválida.", 401
+    except Exception as exc:
+        print(f"⚠️ Falha na validação do webhook PagBank: {exc}")
+        return "Falha na validação.", 401
 
-            return jsonify({
-                "error":
-                    "payload inválido"
-            }), 400
+    payload_hash = hashlib.sha256(raw_body).hexdigest()
 
-        hash_evento = hashlib.sha256(
-            corpo
-        ).hexdigest()
+    db = SessionLocal()
+    evento = None
 
+    try:
         existente = (
-            db.query(
-                WebhookEvent
-            )
-            .filter(
-                WebhookEvent.evento_hash
-                == hash_evento
-            )
+            db.query(WebhookEvento)
+            .filter(WebhookEvento.payload_hash == payload_hash)
             .first()
         )
 
         if existente:
+            return "", 204
 
-            return (
-                "",
-                204
-            )
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except Exception:
+            return "JSON inválido.", 400
 
-        charges = (
-            payload.get(
-                "charges"
-            )
-            or []
+        dados = extrair_dados_pagbank(payload)
+
+        evento = WebhookEvento(
+            evento_id=str(payload.get("id") or payload_hash),
+            order_id=dados["order_id"],
+            charge_id=dados["charge_id"],
+            payload_hash=payload_hash,
+            recebido_em=agora_utc(),
+            status="RECEBIDO",
         )
-
-        order_id = (
-            payload.get("id")
-        )
-
-        charge_id = None
-
-        if charges:
-
-            charge_id = (
-                charges[0].get("id")
-            )
-
-        evento = WebhookEvent(
-            evento_hash=hash_evento,
-            order_id=order_id,
-            charge_id=charge_id,
-            sucesso=False
-        )
-
         db.add(evento)
-
-        db.flush()
+        db.commit()
 
         pagamento = None
 
-        referencia = (
-            payload.get(
-                "reference_id"
-            )
-        )
-
-        if referencia:
-
+        if dados["reference_id"]:
             pagamento = (
                 db.query(Pagamento)
-                .filter(
-                    Pagamento.referencia
-                    == referencia
-                )
+                .filter(Pagamento.referencia == dados["reference_id"])
                 .first()
             )
 
-        if not pagamento and order_id:
-
+        if not pagamento and dados["order_id"]:
             pagamento = (
                 db.query(Pagamento)
-                .filter(
-                    Pagamento.pagbank_order_id
-                    == order_id
-                )
+                .filter(Pagamento.pagbank_order_id == dados["order_id"])
                 .first()
             )
 
-        if not pagamento and charge_id:
+        # Se for uma notificação de pagamento de pedido conhecido,
+        # consulta o pedido diretamente ao PagBank para confirmar o estado.
+        dados_confirmados = dados
 
-            pagamento = (
-                db.query(Pagamento)
-                .filter(
-                    Pagamento.pagbank_charge_id
-                    == charge_id
-                )
-                .first()
-            )
+        if dados["order_id"]:
+            pedido_oficial = consultar_pedido(dados["order_id"])
+            if pedido_oficial:
+                dados_confirmados = extrair_dados_pagbank(pedido_oficial)
+
+        status = str(dados_confirmados.get("status") or "").upper()
 
         if not pagamento:
-
-            evento.mensagem = (
-                "Pagamento não vinculado."
+            referencia = (
+                dados_confirmados.get("reference_id")
+                or dados.get("reference_id")
+                or f"PAGBANK-{dados.get('order_id') or uuid.uuid4()}"
             )
 
-            evento.processado_em = (
-                datetime.utcnow()
+            valor = dados_confirmados.get("valor")
+            valor = int(valor) if valor is not None else 0
+
+            pagamento = Pagamento(
+                referencia=referencia[:80],
+                cliente_id=None,
+                nome_cliente=None,
+                usuario_cliente=None,
+                valor=valor / 100,
+                valor_centavos=valor,
+                status="RECEBIDO_SEM_VINCULO",
+                metodo="PIX",
+                pagbank_order_id=dados_confirmados.get("order_id"),
+                pagbank_charge_id=dados_confirmados.get("charge_id"),
+                webhook_recebido_em=agora_utc(),
+                observacao="Pedido recebido pelo webhook sem cadastro local correspondente.",
+                criado_em=agora_utc(),
             )
+            db.add(pagamento)
+            db.flush()
 
-            db.commit()
+        pagamento.webhook_recebido_em = agora_utc()
 
-            return (
-                "",
-                204
-            )
-
-        if pagamento.status in (
-            "PAID",
-            "PAID_UNLINKED"
-        ):
-
-            evento.sucesso = True
-
-            evento.mensagem = (
-                "Evento já processado."
-            )
-
-            evento.processado_em = (
-                datetime.utcnow()
-            )
-
-            db.commit()
-
-            return (
-                "",
-                204
-            )
-
-        # ----------------------------------------------------
-        # Consulta o pedido diretamente no PagBank.
-        # Não confiamos somente no payload do webhook.
-        # ----------------------------------------------------
-
-        if not pagamento.pagbank_order_id:
-
-            pagamento.pagbank_order_id = (
-                order_id
-            )
-
-        if not pagamento.pagbank_order_id:
-
-            evento.mensagem = (
-                "Pedido PagBank ausente."
-            )
-
-            evento.processado_em = (
-                datetime.utcnow()
-            )
-
-            db.commit()
-
-            return (
-                "",
-                204
-            )
-
-        try:
-
-            dados_pedido = (
-                consultar_pedido_pagbank(
-                    pagamento.pagbank_order_id
-                )
-            )
-
-        except Exception as error:
-
-            evento.mensagem = (
-                "Falha ao consultar pedido: "
-                + str(error)
-            )
-
-            evento.processado_em = (
-                datetime.utcnow()
-            )
-
-            db.commit()
-
-            return (
-                "",
-                204
-            )
-
-        confirmado = (
-            processar_pagamento_confirmado(
+        if status == "PAID":
+            processar_pagamento_pago(
                 db,
                 pagamento,
-                dados_pedido
+                dados_confirmados.get("valor"),
             )
-        )
+        elif status in ("CANCELED", "CANCELLED", "DECLINED"):
+            pagamento.status = "CANCELADO"
+        elif status == "WAITING":
+            pagamento.status = "AGUARDANDO"
 
-        evento.sucesso = bool(
-            confirmado
-            or pagamento.status
-            in (
-                "PAID",
-                "PAID_UNLINKED"
-            )
-        )
-
-        evento.processado_em = (
-            datetime.utcnow()
-        )
-
-        evento.mensagem = (
-            pagamento.observacao
-            or "Evento processado."
-        )
+        evento.status = "PROCESSADO"
+        evento.processado_em = agora_utc()
+        evento.detalhe = status
 
         db.commit()
+        return "", 204
 
-        return (
-            "",
-            204
-        )
-
-    except Exception as error:
-
+    except Exception as exc:
         db.rollback()
 
-        return jsonify({
-            "error":
-                "Erro interno"
-        }), 500
+        if evento:
+            try:
+                evento.status = "ERRO"
+                evento.detalhe = str(exc)[:1000]
+                evento.processado_em = agora_utc()
+                db.add(evento)
+                db.commit()
+            except Exception:
+                db.rollback()
+
+        return "Erro interno.", 500
 
     finally:
-
         db.close()
 
 
 # ============================================================
-# PAGAMENTOS ADMIN
+# ADMINISTRADOR DO SISTEMA DE PAGAMENTOS
+# Não aparece para os clientes.
 # ============================================================
 
-@app.route(
-    "/admin/pagamentos"
-)
-@login_required
-def pagamentos_admin():
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    if request.method == "POST":
+        usuario = request.form.get("usuario", "")
+        senha = request.form.get("senha", "")
+
+        if (
+            usuario == ADMIN_USER
+            and ADMIN_PASSWORD
+            and secrets.compare_digest(senha, ADMIN_PASSWORD)
+        ):
+            session["admin_logado"] = True
+            return redirect(url_for("admin_pagamentos"))
+
+        flash("Login inválido.")
+
+    return render_template_string(
+        BASE_CSS + """
+        <div class="page">
+          <div class="box">
+            <div class="brand">
+              <div class="icon">🔐</div>
+              <h1>Administração</h1>
+              <p>Gestão de pagamentos</p>
+            </div>
+            <div class="card">
+              <form method="post">
+                <label>Usuário</label>
+                <input name="usuario" required>
+                <label>Senha</label>
+                <input name="senha" type="password" required>
+                <button type="submit">Entrar</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        """
+    )
+
+
+@app.route("/admin/logout")
+def admin_logout():
+    session.pop("admin_logado", None)
+    return redirect(url_for("admin_login"))
+
+
+@app.route("/admin/pagamentos")
+@admin_required
+def admin_pagamentos():
+    hoje = date.today()
+    inicio_semana = hoje - timedelta(days=hoje.weekday())
+
+    inicio_dt = datetime.combine(inicio_semana, datetime.min.time())
+    fim_dt = inicio_dt + timedelta(days=7)
 
     db = SessionLocal()
-
     try:
-
-        pagamentos = (
-            db.query(Pagamento)
-            .order_by(
-                Pagamento.criado_em.desc()
-            )
-            .limit(200)
-            .all()
-        )
-
-        content = r"""
-
-<div class="top">
-
-<div>
-
-<h1>
-    💳 Pagamentos Pix
-</h1>
-
-<div class="subtitle">
-    Cobranças e confirmações automáticas do PagBank.
-</div>
-
-</div>
-
-<a
-    class="btn secondary"
-    href="{{ url_for('relatorios') }}"
->
-    📈 Relatórios
-</a>
-
-</div>
-
-<div class="card">
-
-<table>
-
-<thead>
-
-<tr>
-
-<th>
-    Data
-</th>
-
-<th>
-    Cliente
-</th>
-
-<th>
-    Valor
-</th>
-
-<th>
-    Status
-</th>
-
-<th>
-    PagBank
-</th>
-
-</tr>
-
-</thead>
-
-<tbody>
-
-{% for p in pagamentos %}
-
-<tr>
-
-<td>
-    {{ formatar_data(p.criado_em) }}
-</td>
-
-<td>
-
-<strong>
-    {{ p.cliente_nome or 'Não vinculado' }}
-</strong>
-
-<div
-    style="
-        color:#94a3b8;
-        font-size:11px;
-    "
->
-    {{ p.cliente_usuario or '-' }}
-</div>
-
-</td>
-
-<td>
-    {{ dinheiro(p.valor) }}
-</td>
-
-<td>
-
-<span
-    class="badge
-    {{
-        'paid'
-        if p.status in ['PAID','PAID_UNLINKED']
-        else
-        'waiting'
-        if p.status in ['AGUARDANDO','CONFIRMANDO']
-        else
-        'pending'
-    }}"
->
-
-{{ p.status }}
-
-</span>
-
-</td>
-
-<td>
-
-<span
-    style="
-        font-size:11px;
-        color:#94a3b8;
-    "
->
-    {{ p.pagbank_order_id or '-' }}
-</span>
-
-</td>
-
-</tr>
-
-{% else %}
-
-<tr>
-
-<td
-    colspan="5"
-    class="empty"
->
-    Nenhum pagamento registrado.
-</td>
-
-</tr>
-
-{% endfor %}
-
-</tbody>
-
-</table>
-
-</div>
-
-"""
-
-        return page(
-            content,
-            "Pagamentos",
-            "pagamentos",
-            pagamentos=pagamentos
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# RELATÓRIO SEMANAL
-# ============================================================
-
-@app.route(
-    "/admin/relatorios"
-)
-@login_required
-def relatorios():
-
-    db = SessionLocal()
-
-    try:
-
-        hoje = date.today()
-
-        inicio = (
-            hoje
-            - timedelta(
-                days=hoje.weekday()
-            )
-        )
-
-        fim = (
-            inicio
-            + timedelta(days=7)
-        )
-
-        pagamentos = (
+        semana = (
             db.query(Pagamento)
             .filter(
-                Pagamento.status.in_(
-                    [
-                        "PAID",
-                        "PAID_UNLINKED"
-                    ]
-                ),
-                Pagamento.pago_em >=
-                    datetime.combine(
-                        inicio,
-                        datetime.min.time()
-                    ),
-                Pagamento.pago_em <
-                    datetime.combine(
-                        fim,
-                        datetime.min.time()
-                    )
+                Pagamento.status == "PAGO",
+                Pagamento.pago_em >= inicio_dt,
+                Pagamento.pago_em < fim_dt,
             )
-            .order_by(
-                Pagamento.pago_em.desc()
-            )
+            .order_by(Pagamento.pago_em.desc())
             .all()
         )
 
-        total = sum(
-            float(p.valor or 0)
-            for p in pagamentos
+        total = sum(float(p.valor or 0) for p in semana)
+
+        ultimos = (
+            db.query(Pagamento)
+            .order_by(Pagamento.criado_em.desc())
+            .limit(50)
+            .all()
         )
 
-        vinculados = sum(
-            1
-            for p in pagamentos
-            if p.status == "PAID"
+        sem_vinculo = (
+            db.query(Pagamento)
+            .filter(Pagamento.status == "RECEBIDO_SEM_VINCULO")
+            .order_by(Pagamento.pago_em.desc())
+            .limit(20)
+            .all()
         )
 
-        nao_vinculados = sum(
-            1
-            for p in pagamentos
-            if p.status == "PAID_UNLINKED"
+        return render_template_string(
+            BASE_CSS + """
+            <div class="page">
+              <div style="width:min(1100px,100%);margin:auto">
+                <div class="brand">
+                  <div class="icon">📊</div>
+                  <h1>Relatório de Pagamentos</h1>
+                  <p>Semana iniciada em {{ inicio }}</p>
+                </div>
+
+                <div class="card">
+                  <h2>{{ total_formatado }}</h2>
+                  <p class="small">{{ quantidade }} pagamentos confirmados nesta semana.</p>
+                </div>
+
+                {% if sem_vinculo %}
+                <div class="card">
+                  <h3>⚠️ Recebidos sem vínculo</h3>
+                  <p class="small">
+                    Estes pagamentos precisam ser verificados manualmente.
+                  </p>
+                  <table>
+                    <tr>
+                      <th>Referência</th>
+                      <th>Valor</th>
+                      <th>Data</th>
+                    </tr>
+                    {% for p in sem_vinculo %}
+                    <tr>
+                      <td>{{ p.referencia }}</td>
+                      <td>{{ dinheiro(p.valor) }}</td>
+                      <td>{{ p.pago_em or "-" }}</td>
+                    </tr>
+                    {% endfor %}
+                  </table>
+                </div>
+                {% endif %}
+
+                <div class="card">
+                  <h3>Últimos pagamentos</h3>
+                  <table>
+                    <tr>
+                      <th>Cliente</th>
+                      <th>Valor</th>
+                      <th>Status</th>
+                      <th>Data</th>
+                    </tr>
+                    {% for p in ultimos %}
+                    <tr>
+                      <td>{{ p.nome_cliente or "-" }}</td>
+                      <td>{{ dinheiro(p.valor) }}</td>
+                      <td>{{ p.status }}</td>
+                      <td>{{ p.criado_em }}</td>
+                    </tr>
+                    {% endfor %}
+                  </table>
+                </div>
+
+                <a class="btn btn-secondary" href="{{ url_for('admin_logout') }}">
+                  Sair
+                </a>
+              </div>
+            </div>
+            """,
+            inicio=inicio_semana.strftime("%d/%m/%Y"),
+            total_formatado=dinheiro(total),
+            quantidade=len(semana),
+            ultimos=ultimos,
+            sem_vinculo=sem_vinculo,
+            dinheiro=dinheiro,
         )
-
-        content = r"""
-
-<div class="top">
-
-<div>
-
-<h1>
-    📈 Relatório semanal
-</h1>
-
-<div class="subtitle">
-    Semana de
-    {{ inicio.strftime('%d/%m/%Y') }}
-    até
-    {{ (fim - timedelta(days=1)).strftime('%d/%m/%Y') }}
-</div>
-
-</div>
-
-<a
-    class="btn secondary"
-    href="{{ url_for('pagamentos_admin') }}"
->
-    💳 Pagamentos
-</a>
-
-</div>
-
-<div class="grid">
-
-<div class="card">
-
-<div class="metric-label">
-    💰 Total recebido
-</div>
-
-<div class="metric green">
-    {{ dinheiro(total) }}
-</div>
-
-</div>
-
-<div class="card">
-
-<div class="metric-label">
-    💳 Pagamentos
-</div>
-
-<div class="metric">
-    {{ pagamentos|length }}
-</div>
-
-</div>
-
-<div class="card">
-
-<div class="metric-label">
-    👤 Vinculados
-</div>
-
-<div class="metric green">
-    {{ vinculados }}
-</div>
-
-</div>
-
-<div class="card">
-
-<div class="metric-label">
-    ⚠️ Não vinculados
-</div>
-
-<div class="metric yellow">
-    {{ nao_vinculados }}
-</div>
-
-</div>
-
-</div>
-
-<div class="card">
-
-<h3>
-    Pagamentos da semana
-</h3>
-
-<table>
-
-<thead>
-
-<tr>
-
-<th>
-    Data
-</th>
-
-<th>
-    Cliente
-</th>
-
-<th>
-    Usuário
-</th>
-
-<th>
-    Valor
-</th>
-
-<th>
-    Status
-</th>
-
-</tr>
-
-</thead>
-
-<tbody>
-
-{% for p in pagamentos %}
-
-<tr>
-
-<td>
-    {{ formatar_data(p.pago_em) }}
-</td>
-
-<td>
-    {{ p.cliente_nome or 'Não localizado' }}
-</td>
-
-<td>
-    {{ p.cliente_usuario or '-' }}
-</td>
-
-<td>
-    {{ dinheiro(p.valor) }}
-</td>
-
-<td>
-    {{ p.status }}
-</td>
-
-</tr>
-
-{% else %}
-
-<tr>
-
-<td
-    colspan="5"
-    class="empty"
->
-    Nenhum pagamento confirmado nesta semana.
-</td>
-
-</tr>
-
-{% endfor %}
-
-</tbody>
-
-</table>
-
-</div>
-
-"""
-
-        return page(
-            content,
-            "Relatórios",
-            "relatorios",
-            pagamentos=pagamentos,
-            total=total,
-            vinculados=vinculados,
-            nao_vinculados=nao_vinculados,
-            inicio=inicio,
-            fim=fim,
-            timedelta=timedelta
-        )
-
     finally:
-
         db.close()
 
 
@@ -5938,79 +1518,23 @@ def relatorios():
 
 @app.route("/health")
 def health():
+    return jsonify({
+        "ok": True,
+        "servico": "Renovação IPTV",
+        "pagbank_ambiente": PAGBANK_ENV,
+        "public_url_configurada": bool(APP_PUBLIC_URL),
+    })
 
-    db = SessionLocal()
-
-    try:
-
-        db.execute(
-            text("SELECT 1")
-        )
-
-        return {
-            "status":
-                "ok",
-
-            "database":
-                "connected",
-
-            "pagbank":
-                bool(PAGBANK_TOKEN),
-
-            "environment":
-                PAGBANK_ENV
-        }
-
-    except Exception as error:
-
-        return {
-            "status":
-                "error",
-
-            "database":
-                str(error)
-        }, 500
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# 404
-# ============================================================
 
 @app.errorhandler(404)
-def not_found(error):
-
-    if session.get(
-        "logged_in"
-    ):
-
-        return redirect(
-            url_for("dashboard")
-        )
-
-    return redirect(
-        url_for("login")
-    )
+def pagina_404(_):
+    return redirect(url_for("pagar"))
 
 
 # ============================================================
-# EXECUÇÃO
+# EXECUÇÃO LOCAL
 # ============================================================
 
 if __name__ == "__main__":
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=False
-    )
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port, debug=False)
