@@ -918,7 +918,7 @@ def criar_pedido_pix(pagamento):
     # O endpoint Order do PagBank exige customer.email e customer.tax_id.
     # Para não pedir e-mail ao cliente, o sistema gera automaticamente um
     # identificador de e-mail técnico, sem exibir esse campo na tela.
-    email_tecnico = f"cliente.{pagamento.referencia.lower()}@iptv-renovacao.onrender.com"
+    email_tecnico = f"cliente.{pagamento.referencia.lower()}@example.com"
 
     customer = {
         "name": nome_cliente,
@@ -984,21 +984,36 @@ def criar_pedido_pix(pagamento):
         raise RuntimeError("PagBank não retornou a cobrança PIX.")
 
     charge = charges[0]
-    qr_code = charge.get("qr_code") or {}
 
     pagamento.pagbank_order_id = dados.get("id")
     pagamento.pagbank_charge_id = charge.get("id")
-    pagamento.qr_code_text = qr_code.get("text")
     pagamento.status = charge.get("status") or "WAITING"
 
+    # O PagBank pode retornar o QR Code em estruturas diferentes conforme
+    # a versão do endpoint. Primeiro tentamos charges[].qr_code e depois
+    # a coleção qr_codes do pedido.
+    qr_code = charge.get("qr_code") or {}
+    qr_codes = dados.get("qr_codes") or []
+    if not qr_code and qr_codes:
+        qr_code = qr_codes[0] or {}
+
+    pagamento.qr_code_text = qr_code.get("text")
+
     links = charge.get("links") or []
+    links += dados.get("links") or []
     for link in links:
-        if link.get("rel") == "QRCODE.PNG":
+        rel = str(link.get("rel") or "").upper()
+        if rel in ("QRCODE.PNG", "QRCODE.BASE64") and link.get("href"):
             pagamento.qr_code_url = link.get("href")
             break
 
     if not pagamento.qr_code_text:
-        raise RuntimeError("PagBank não retornou o Pix copia e cola.")
+        # Algumas respostas colocam o texto em qr_codes[].text mesmo quando
+        # a charge não possui o campo qr_code.
+        raise RuntimeError(
+            "PagBank criou o pedido, mas não retornou o PIX copia e cola. "
+            f"Pedido: {dados.get('id') or 'não informado'}."
+        )
 
     db = SessionLocal()
     try:
@@ -1618,17 +1633,20 @@ def confirmar_pagamento():
             ), 502
 
         return redirect(url_for("pix", referencia=pagamento.referencia))
-    except Exception:
+    except Exception as exc:
         db.rollback()
         return render_template_string(
             BASE_CSS + """
             <div class="page"><div class="box">
-              <div class="brand"><div class="icon">⚠️</div><h1>Não foi possível continuar</h1></div>
-              <div class="card"><p class="err">O sistema não conseguiu finalizar a criação do pagamento.</p>
+              <div class="brand"><div class="icon">⚠️</div><h1>Não foi possível gerar o PIX</h1></div>
+              <div class="card">
+                <p class="err">O sistema encontrou um erro ao finalizar o pagamento.</p>
+                <p class="small"><strong>Detalhes:</strong> {{ erro }}</p>
                 <a class="btn btn-secondary" href="{{ url_for('pagar') }}">Voltar</a>
               </div>
             </div></div>
             """,
+            erro=str(exc)[:1500],
         ), 500
     finally:
         db.close()
