@@ -47,8 +47,9 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 APP_PUBLIC_URL = os.getenv("APP_PUBLIC_URL", "https://iptv-renovacao.onrender.com").strip().rstrip("/")
 PAGBANK_TOKEN = os.getenv("PAGBANK_TOKEN", "").strip()
 PAGBANK_ENV = os.getenv("PAGBANK_ENV", "production").strip().lower()
+if PAGBANK_ENV not in ("production", "sandbox"):
+    PAGBANK_ENV = "production"
 PAGBANK_TIMEOUT = int(os.getenv("PAGBANK_TIMEOUT", "25"))
-PAGBANK_CUSTOMER_EMAIL = os.getenv("PAGBANK_CUSTOMER_EMAIL", "").strip()
 PAGBANK_BASE_URL = (
     "https://api.pagseguro.com"
     if PAGBANK_ENV == "production"
@@ -91,6 +92,9 @@ class Pagamento(Base):
     webhook_recebido_em = Column(DateTime, nullable=True)
     observacao = Column(Text, nullable=True)
     idempotency_key = Column(String(100), nullable=True, unique=True)
+    customer_email = Column(String(254), nullable=True)
+    customer_tax_id = Column(String(20), nullable=True)
+    customer_phone = Column(String(30), nullable=True)
 
 
 class WebhookEvento(Base):
@@ -156,6 +160,9 @@ def garantir_schema():
             "webhook_recebido_em": "TIMESTAMP",
             "observacao": "TEXT",
             "idempotency_key": "VARCHAR(100)",
+            "customer_email": "VARCHAR(254)",
+            "customer_tax_id": "VARCHAR(20)",
+            "customer_phone": "VARCHAR(30)",
         },
         "pagbank_webhook_eventos": {
             "evento_id": "VARCHAR(180)",
@@ -290,7 +297,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px;bor
     <a class="{{ 'active' if active=='clientes' else '' }}" href="{{ url_for('clientes') }}">👥 Clientes</a>
     <a class="{{ 'active' if active=='novo' else '' }}" href="{{ url_for('novo_cliente') }}">➕ Adicionar</a>
     <a class="{{ 'active' if active=='importar' else '' }}" href="{{ url_for('importar') }}">📥 Importar</a>
-    <a href="{{ url_for('pagar') }}" target="_blank">💳 Renovação IPTV</a>
+    <a href="{{ url_for('pagar') }}" target="_blank">💳 Pagamento PIX</a>
   </nav>
   <div class="logout"><a href="{{ url_for('logout') }}">🚪 Sair</a></div>
 </aside>
@@ -366,7 +373,7 @@ def dashboard():
 <div class="top"><div><h1>Dashboard</h1><div class="subtitle">Visão geral da sua operação</div></div></div>
 <div class="card" style="margin-bottom:18px">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:15px;flex-wrap:wrap">
-    <div><h3 style="margin:0 0 6px">💳 Link de Renovação IPTV</h3><div class="subtitle" style="margin:0">Envie este link aos seus clientes para pagamento via Pix.</div></div>
+    <div><h3 style="margin:0 0 6px">💳 Link de Pagamento PIX</h3><div class="subtitle" style="margin:0">Envie este link aos seus clientes para pagamento via Pix.</div></div>
     <div class="actions"><a class="btn primary" href="{{ url_for('pagar') }}" target="_blank">Abrir página de renovação</a></div>
   </div>
   <div class="copybox" style="margin-top:14px">{{ public_renewal_url }}</div>
@@ -395,7 +402,7 @@ def dashboard():
 <tr><td>Total previsto</td><td class="blue"><strong>{{ dinheiro(resumo.previsto) }}</strong></td></tr></table>
 </div></div>
 """
-        return render_template_string(BASE, content=render_template_string(content, resumo=resumo, dinheiro=dinheiro, public_renewal_url=APP_PUBLIC_URL+"/renovacao"), title="Dashboard", active="dashboard")
+        return render_template_string(BASE, content=render_template_string(content, resumo=resumo, dinheiro=dinheiro, public_renewal_url=APP_PUBLIC_URL+"/pagar"), title="Dashboard", active="dashboard")
     finally:
         db.close()
 
@@ -844,6 +851,43 @@ def salvar_config(chave, valor):
 # PAGBANK
 # ============================================================
 
+def normalizar_cpf(valor):
+    return re.sub(r"\D", "", str(valor or ""))
+
+
+def validar_cpf(valor):
+    cpf = normalizar_cpf(valor)
+    if len(cpf) != 11 or cpf == cpf[0] * 11:
+        return False
+    soma = sum(int(cpf[i]) * (10 - i) for i in range(9))
+    digito1 = (soma * 10) % 11
+    if digito1 == 10:
+        digito1 = 0
+    if digito1 != int(cpf[9]):
+        return False
+    soma = sum(int(cpf[i]) * (11 - i) for i in range(10))
+    digito2 = (soma * 10) % 11
+    if digito2 == 10:
+        digito2 = 0
+    return digito2 == int(cpf[10])
+
+
+def normalizar_telefone(valor):
+    return re.sub(r"\D", "", str(valor or ""))
+
+
+def validar_telefone(valor):
+    numero = normalizar_telefone(valor)
+    return len(numero) in (10, 11) and numero[0] in "23456789" if len(numero) == 10 else len(numero) == 11 and numero[2] in "9"
+
+
+def dados_telefone_pagbank(valor):
+    numero = normalizar_telefone(valor)
+    if len(numero) == 11:
+        return {"country": "55", "area": numero[:2], "number": numero[2:], "type": "MOBILE"}
+    return {"country": "55", "area": numero[:2], "number": numero[2:], "type": "MOBILE"}
+
+
 def criar_pedido_pix(pagamento):
     if not PAGBANK_TOKEN:
         raise RuntimeError("PAGBANK_TOKEN não configurado.")
@@ -855,18 +899,33 @@ def criar_pedido_pix(pagamento):
 
     expiracao = datetime.now(timezone.utc) + timedelta(minutes=30)
 
-    # A API Order do PagBank exige o objeto customer.
-    # O sistema IPTV não coleta CPF/e-mail do cliente, então enviamos
-    # somente o nome, que é suficiente para o objeto customer.
+    # A API Order do PagBank exige customer.name, customer.email e customer.tax_id
+    # para este fluxo. O sistema IPTV não tinha esses dados no cadastro original,
+    # então o sistema coleta apenas os dados necessários do pagador na tela pública do Sistema IPTV.
     nome_cliente = " ".join(str(pagamento.nome_cliente or "Cliente IPTV").split()).strip()
     if len(nome_cliente.split()) == 1:
         nome_cliente = f"{nome_cliente} Cliente"
     if len(nome_cliente) > 120:
         nome_cliente = nome_cliente[:120].strip()
 
-    customer = {"name": nome_cliente}
-    if PAGBANK_CUSTOMER_EMAIL:
-        customer["email"] = PAGBANK_CUSTOMER_EMAIL
+    cpf_cliente = normalizar_cpf(pagamento.customer_tax_id)
+    telefone_cliente = normalizar_telefone(pagamento.customer_phone)
+    if not validar_cpf(cpf_cliente):
+        raise RuntimeError("Informe um CPF válido para gerar o PIX.")
+    if not validar_telefone(telefone_cliente):
+        raise RuntimeError("Informe um celular válido para gerar o PIX.")
+
+    # O endpoint Order do PagBank exige customer.email e customer.tax_id.
+    # Para não pedir e-mail ao cliente, o sistema gera automaticamente um
+    # identificador de e-mail técnico, sem exibir esse campo na tela.
+    email_tecnico = f"cliente.{pagamento.referencia.lower()}@iptv-renovacao.onrender.com"
+
+    customer = {
+        "name": nome_cliente,
+        "email": email_tecnico,
+        "tax_id": cpf_cliente,
+        "phones": [dados_telefone_pagbank(telefone_cliente)],
+    }
 
     payload = {
         "reference_id": pagamento.referencia,
@@ -874,7 +933,7 @@ def criar_pedido_pix(pagamento):
         "items": [
             {
                 "reference_id": pagamento.referencia,
-                "name": "Renovação IPTV",
+                "name": "Pagamento IPTV",
                 "quantity": 1,
                 "unit_amount": pagamento.valor_centavos,
             }
@@ -885,7 +944,7 @@ def criar_pedido_pix(pagamento):
         "charges": [
             {
                 "reference_id": pagamento.referencia,
-                "description": "Renovação IPTV",
+                "description": "Pagamento IPTV",
                 "amount": {
                     "value": pagamento.valor_centavos,
                     "currency": "BRL",
@@ -1256,8 +1315,8 @@ th, td {
 # PÁGINA PÚBLICA
 # ============================================================
 
-@app.route("/renovacao", methods=["GET"])
 @app.route("/pagar", methods=["GET"])
+@app.route("/renovacao", methods=["GET"])
 def pagar():
     busca = request.args.get("busca", "").strip()
     clientes = []
@@ -1282,7 +1341,7 @@ def pagar():
           <div class="box">
             <div class="brand">
               <div class="icon">📺</div>
-              <h1>Renovação IPTV</h1>
+              <h1>Sistema IPTV</h1>
               <p>Faça sua renovação de forma rápida e segura pelo PIX.</p>
             </div>
 
@@ -1360,7 +1419,7 @@ def selecionar_cliente(cliente_id):
           <div class="box">
             <div class="brand">
               <div class="icon">💳</div>
-              <h1>Renovação IPTV</h1>
+              <h1>Sistema IPTV</h1>
               <p>Confirme os dados para gerar seu PIX.</p>
             </div>
 
@@ -1384,8 +1443,30 @@ def selecionar_cliente(cliente_id):
                     required
                 >
 
+                <label>4. Celular do pagador</label>
+                <input
+                    type="text"
+                    name="celular"
+                    inputmode="tel"
+                    maxlength="15"
+                    placeholder="(00) 90000-0000"
+                    required
+                >
+
+                <label>5. CPF do pagador</label>
+                <input
+                    type="text"
+                    name="cpf"
+                    inputmode="numeric"
+                    maxlength="14"
+                    placeholder="000.000.000-00"
+                    required
+                >
+
+                <p class="small">Informe seu celular e CPF. O e-mail não é solicitado.</p>
+
                 <button type="submit">
-                  Continuar para confirmar PIX
+                  Gerar PIX
                 </button>
               </form>
 
@@ -1400,7 +1481,7 @@ def selecionar_cliente(cliente_id):
         nome=session.get("cliente_pagamento_nome", ""),
         usuario=session.get("cliente_pagamento_usuario", ""),
         valor=f"{valor_padrao:.2f}".replace(".", ","),
-        csrf=csrf_token(),
+                csrf=csrf_token(),
     )
 
 
@@ -1431,6 +1512,35 @@ def confirmar_pagamento():
             erro=str(exc), cliente_id=cliente_id,
         ), 400
 
+    celular_cliente = normalizar_telefone(request.form.get("celular"))
+    cpf_cliente = normalizar_cpf(request.form.get("cpf"))
+
+    if not validar_telefone(celular_cliente):
+        return render_template_string(
+            BASE_CSS + """
+            <div class="page"><div class="box">
+              <div class="brand"><div class="icon">⚠️</div><h1>Celular inválido</h1></div>
+              <div class="card"><p class="err">Informe um celular válido com DDD.</p>
+                <a class="btn btn-secondary" href="{{ url_for('selecionar_cliente', cliente_id=cliente_id) }}">Voltar</a>
+              </div>
+            </div></div>
+            """,
+            cliente_id=cliente_id,
+        ), 400
+
+    if not validar_cpf(cpf_cliente):
+        return render_template_string(
+            BASE_CSS + """
+            <div class="page"><div class="box">
+              <div class="brand"><div class="icon">⚠️</div><h1>CPF inválido</h1></div>
+              <div class="card"><p class="err">Informe um CPF válido para gerar o PIX.</p>
+                <a class="btn btn-secondary" href="{{ url_for('selecionar_cliente', cliente_id=cliente_id) }}">Voltar</a>
+              </div>
+            </div></div>
+            """,
+            cliente_id=cliente_id,
+        ), 400
+
     pagamento_id = None
     referencia = None
 
@@ -1452,6 +1562,9 @@ def confirmar_pagamento():
             status="CRIANDO",
             metodo="PIX",
             idempotency_key=str(uuid.uuid4()),
+            customer_email=None,
+            customer_tax_id=cpf_cliente,
+            customer_phone=celular_cliente,
             criado_em=agora_utc(),
         )
         db.add(pagamento)
@@ -1540,7 +1653,7 @@ def pix(referencia):
               <div class="box">
                 <div class="brand">
                   <div class="icon">📺</div>
-                  <h1>Renovação IPTV</h1>
+                  <h1>Sistema IPTV</h1>
                   <p>Seu PIX foi gerado.</p>
                 </div>
 
@@ -2021,7 +2134,7 @@ def health_pagbank():
     return jsonify({
         "ok": True,
         "servico": "Sistema IPTV",
-        "renovacao": APP_PUBLIC_URL + "/renovacao",
+        "pagamento_pix": APP_PUBLIC_URL + "/pagar",
         "pagbank_ambiente": PAGBANK_ENV,
         "pagbank_configurado": bool(PAGBANK_TOKEN),
     })
