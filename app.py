@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from functools import wraps
 
-from flask import Flask, request, redirect, url_for, session, render_template_string, flash
+from flask import Flask, request, redirect, url_for, session, render_template_string, flash, jsonify
 from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Text, func
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
@@ -153,7 +153,7 @@ BASE = r"""
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ title }} · IPTV Manager</title>
+<title>{{ title }} · Sistema IPTV</title>
 <style>
 :root{
   --bg:#0b0f17;--panel:#111827;--panel2:#151e2d;--border:#243044;
@@ -212,7 +212,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px;bor
 <aside class="sidebar">
   <div class="brand">
     <div class="brand-icon">📺</div>
-    <div><strong>IPTV Manager</strong><span>Administração</span></div>
+    <div><strong>Sistema IPTV</strong><span>Administração</span></div>
   </div>
   <div class="nav-title">Menu</div>
   <nav class="nav">
@@ -237,7 +237,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px;bor
 
 LOGIN = r"""
 <!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Login · IPTV Manager</title><style>
+<title>Login · Sistema IPTV</title><style>
 *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:linear-gradient(135deg,#080c13,#0f172a);color:#fff;font-family:Inter,system-ui}
 .login{width:min(410px,92%);background:#111827;border:1px solid #243044;border-radius:20px;padding:32px;box-shadow:0 20px 60px #0006}
 .icon{width:58px;height:58px;margin:auto;border-radius:16px;display:grid;place-items:center;background:linear-gradient(135deg,#2563eb,#06b6d4);font-size:29px}
@@ -245,7 +245,7 @@ h1{text-align:center;margin:15px 0 5px}.sub{text-align:center;color:#94a3b8;marg
 label{display:block;color:#cbd5e1;font-size:13px;margin:13px 0 7px}input{width:100%;padding:12px;border-radius:10px;border:1px solid #243044;background:#0b1220;color:#fff;font-size:15px}
 button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:10px;background:#3b82f6;color:#fff;font-weight:800;font-size:15px;cursor:pointer}
 .error{background:#451a1a;color:#fecaca;padding:10px;border-radius:9px;margin-bottom:12px}
-</style></head><body><div class="login"><div class="icon">📺</div><h1>IPTV Manager</h1><div class="sub">Painel administrativo</div>
+</style></head><body><div class="login"><div class="icon">📺</div><h1>Sistema IPTV</h1><div class="sub">Painel administrativo</div>
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 <form method="post"><label>Usuário</label><input name="usuario" autocomplete="username" required><label>Senha</label><input type="password" name="senha" autocomplete="current-password" required><button>Entrar</button></form>
 </div></body></html>
@@ -638,10 +638,6 @@ def importar():
 def not_found(error):
     return redirect(url_for("dashboard" if session.get("logged_in") else "login"))
 
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
 
 
 # ============================================================
@@ -1911,8 +1907,12 @@ def admin_pagamentos():
 def health_pagbank():
     return jsonify({
         "ok": True,
-        "servico": "IPTV Manager",
+        "servico": "Sistema IPTV",
         "renovacao": APP_PUBLIC_URL + "/renovacao",
         "pagbank_ambiente": PAGBANK_ENV,
         "pagbank_configurado": bool(PAGBANK_TOKEN),
     })
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
