@@ -4,6 +4,7 @@ import uuid
 import base64
 import hashlib
 import secrets
+import traceback
 from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from functools import wraps
@@ -889,36 +890,34 @@ def dados_telefone_pagbank(valor):
 
 
 def criar_pedido_pix(pagamento):
+    """Cria o pedido PIX no PagBank usando a sessão da rota chamadora.
+
+    Esta função NÃO abre outra sessão SQLAlchemy e NÃO faz commit.
+    A rota que chamou a função é responsável por persistir o resultado.
+    """
     if not PAGBANK_TOKEN:
-        raise RuntimeError("PAGBANK_TOKEN não configurado.")
+        raise RuntimeError("PAGBANK_TOKEN não configurado no Render.")
 
     if not APP_PUBLIC_URL.startswith("https://"):
-        raise RuntimeError(
-            "APP_PUBLIC_URL precisa usar HTTPS para receber o webhook."
-        )
+        raise RuntimeError("APP_PUBLIC_URL precisa usar HTTPS para receber o webhook.")
 
-    expiracao = datetime.now(timezone.utc) + timedelta(minutes=30)
-
-    # A API Order do PagBank exige customer.name, customer.email e customer.tax_id
-    # para este fluxo. O sistema IPTV não tinha esses dados no cadastro original,
-    # então o sistema coleta apenas os dados necessários do pagador na tela pública do Sistema IPTV.
     nome_cliente = " ".join(str(pagamento.nome_cliente or "Cliente IPTV").split()).strip()
-    if len(nome_cliente.split()) == 1:
-        nome_cliente = f"{nome_cliente} Cliente"
+    if not nome_cliente:
+        nome_cliente = "Cliente IPTV"
     if len(nome_cliente) > 120:
         nome_cliente = nome_cliente[:120].strip()
 
     cpf_cliente = normalizar_cpf(pagamento.customer_tax_id)
     telefone_cliente = normalizar_telefone(pagamento.customer_phone)
+
     if not validar_cpf(cpf_cliente):
         raise RuntimeError("Informe um CPF válido para gerar o PIX.")
     if not validar_telefone(telefone_cliente):
         raise RuntimeError("Informe um celular válido para gerar o PIX.")
 
-    # O endpoint Order do PagBank exige customer.email e customer.tax_id.
-    # Para não pedir e-mail ao cliente, o sistema gera automaticamente um
-    # identificador de e-mail técnico, sem exibir esse campo na tela.
-    email_tecnico = f"cliente.{pagamento.referencia.lower()}@example.com"
+    # O PagBank exige e-mail no objeto customer. Como o cliente não informa
+    # e-mail, usamos um endereço técnico único, sem pedir esse dado na tela.
+    email_tecnico = f"cliente.{pagamento.referencia.lower()}@iptv-renovacao.onrender.com"
 
     customer = {
         "name": nome_cliente,
@@ -926,6 +925,8 @@ def criar_pedido_pix(pagamento):
         "tax_id": cpf_cliente,
         "phones": [dados_telefone_pagbank(telefone_cliente)],
     }
+
+    expiracao = datetime.now(timezone.utc) + timedelta(minutes=30)
 
     payload = {
         "reference_id": pagamento.referencia,
@@ -935,18 +936,16 @@ def criar_pedido_pix(pagamento):
                 "reference_id": pagamento.referencia,
                 "name": "Pagamento IPTV",
                 "quantity": 1,
-                "unit_amount": pagamento.valor_centavos,
+                "unit_amount": int(pagamento.valor_centavos),
             }
         ],
-        "notification_urls": [
-            public_url("/webhook/pagbank")
-        ],
+        "notification_urls": [public_url("/webhook/pagbank")],
         "charges": [
             {
                 "reference_id": pagamento.referencia,
                 "description": "Pagamento IPTV",
                 "amount": {
-                    "value": pagamento.valor_centavos,
+                    "value": int(pagamento.valor_centavos),
                     "currency": "BRL",
                 },
                 "payment_method": {
@@ -959,12 +958,15 @@ def criar_pedido_pix(pagamento):
         ],
     }
 
-    resposta = requests.post(
-        f"{PAGBANK_BASE_URL}/orders",
-        headers=pagbank_headers(pagamento.idempotency_key),
-        json=payload,
-        timeout=PAGBANK_TIMEOUT,
-    )
+    try:
+        resposta = requests.post(
+            f"{PAGBANK_BASE_URL}/orders",
+            headers=pagbank_headers(pagamento.idempotency_key),
+            json=payload,
+            timeout=PAGBANK_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Não foi possível conectar ao PagBank: {exc}") from exc
 
     if resposta.status_code not in (200, 201):
         erro = json_response_error(resposta)
@@ -974,61 +976,45 @@ def criar_pedido_pix(pagamento):
             detalhe = str(erro)
         raise RuntimeError(
             f"PagBank recusou a criação do PIX (HTTP {resposta.status_code}). "
-            f"Resposta: {detalhe[:1200]}"
+            f"Resposta: {detalhe[:1800]}"
         )
 
-    dados = resposta.json()
+    try:
+        dados = resposta.json()
+    except ValueError as exc:
+        raise RuntimeError("O PagBank respondeu sem um JSON válido.") from exc
+
     charges = dados.get("charges") or []
-
     if not charges:
-        raise RuntimeError("PagBank não retornou a cobrança PIX.")
+        raise RuntimeError(
+            "PagBank criou o pedido, mas não retornou a cobrança PIX em charges."
+        )
 
-    charge = charges[0]
+    charge = charges[0] or {}
+    qr_code = charge.get("qr_code") or {}
+    links = charge.get("links") or []
+
+    qr_code_text = qr_code.get("text")
+    qr_code_url = None
+    for link in links:
+        if link.get("rel") == "QRCODE.PNG":
+            qr_code_url = link.get("href")
+            break
+
+    if not qr_code_text:
+        raise RuntimeError(
+            "PagBank não retornou o PIX copia e cola em charges.qr_code.text. "
+            f"Resposta: {json.dumps(dados, ensure_ascii=False)[:1800]}"
+        )
 
     pagamento.pagbank_order_id = dados.get("id")
     pagamento.pagbank_charge_id = charge.get("id")
+    pagamento.qr_code_text = qr_code_text
+    pagamento.qr_code_url = qr_code_url
     pagamento.status = charge.get("status") or "WAITING"
 
-    # O PagBank pode retornar o QR Code em estruturas diferentes conforme
-    # a versão do endpoint. Primeiro tentamos charges[].qr_code e depois
-    # a coleção qr_codes do pedido.
-    qr_code = charge.get("qr_code") or {}
-    qr_codes = dados.get("qr_codes") or []
-    if not qr_code and qr_codes:
-        qr_code = qr_codes[0] or {}
-
-    pagamento.qr_code_text = qr_code.get("text")
-
-    links = charge.get("links") or []
-    links += dados.get("links") or []
-    for link in links:
-        rel = str(link.get("rel") or "").upper()
-        if rel in ("QRCODE.PNG", "QRCODE.BASE64") and link.get("href"):
-            pagamento.qr_code_url = link.get("href")
-            break
-
-    if not pagamento.qr_code_text:
-        # Algumas respostas colocam o texto em qr_codes[].text mesmo quando
-        # a charge não possui o campo qr_code.
-        raise RuntimeError(
-            "PagBank criou o pedido, mas não retornou o PIX copia e cola. "
-            f"Pedido: {dados.get('id') or 'não informado'}."
-        )
-
-    db = SessionLocal()
-    try:
-        registro = db.query(Pagamento).filter(Pagamento.id == pagamento.id).first()
-        if not registro:
-            raise RuntimeError("Pagamento não encontrado.")
-
-        registro.pagbank_order_id = pagamento.pagbank_order_id
-        registro.pagbank_charge_id = pagamento.pagbank_charge_id
-        registro.qr_code_text = pagamento.qr_code_text
-        registro.qr_code_url = pagamento.qr_code_url
-        registro.status = pagamento.status
-        db.commit()
-    finally:
-        db.close()
+    if not pagamento.pagbank_order_id or not pagamento.pagbank_charge_id:
+        raise RuntimeError("PagBank não retornou os identificadores do pedido/cobrança.")
 
     return dados
 
@@ -1611,10 +1597,19 @@ def confirmar_pagamento():
 
         try:
             criar_pedido_pix(pagamento)
-        except Exception as exc:
-            pagamento.status = "ERRO_CRIACAO"
-            pagamento.observacao = str(exc)[:2000]
             db.commit()
+        except Exception as exc:
+            db.rollback()
+            try:
+                db.query(Pagamento).filter(Pagamento.id == pagamento.id).update({
+                    Pagamento.status: "ERRO_CRIACAO",
+                    Pagamento.observacao: str(exc)[:2000],
+                })
+                db.commit()
+            except Exception:
+                db.rollback()
+            print("ERRO AO GERAR PIX:", repr(exc))
+            traceback.print_exc()
 
             return render_template_string(
                 BASE_CSS + """
@@ -1635,13 +1630,15 @@ def confirmar_pagamento():
         return redirect(url_for("pix", referencia=pagamento.referencia))
     except Exception as exc:
         db.rollback()
+        print("ERRO INTERNO EM /confirmar-pagamento:", repr(exc))
+        traceback.print_exc()
         return render_template_string(
             BASE_CSS + """
             <div class="page"><div class="box">
-              <div class="brand"><div class="icon">⚠️</div><h1>Não foi possível gerar o PIX</h1></div>
+              <div class="brand"><div class="icon">⚠️</div><h1>Erro ao gerar o PIX</h1></div>
               <div class="card">
                 <p class="err">O sistema encontrou um erro ao finalizar o pagamento.</p>
-                <p class="small"><strong>Detalhes:</strong> {{ erro }}</p>
+                <p class="small">{{ erro }}</p>
                 <a class="btn btn-secondary" href="{{ url_for('pagar') }}">Voltar</a>
               </div>
             </div></div>
