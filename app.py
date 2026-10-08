@@ -51,6 +51,7 @@ PAGBANK_ENV = os.getenv("PAGBANK_ENV", "production").strip().lower()
 if PAGBANK_ENV not in ("production", "sandbox"):
     PAGBANK_ENV = "production"
 PAGBANK_TIMEOUT = int(os.getenv("PAGBANK_TIMEOUT", "25"))
+PAGBANK_CUSTOMER_EMAIL = os.getenv("PAGBANK_CUSTOMER_EMAIL", "").strip()
 PAGBANK_BASE_URL = (
     "https://api.pagseguro.com"
     if PAGBANK_ENV == "production"
@@ -913,10 +914,16 @@ def criar_pedido_pix(pagamento, db):
     if not validar_telefone(telefone_cliente):
         raise RuntimeError("Celular inválido. Informe um celular com DDD.")
 
-    # O PagBank exige e-mail no objeto customer. O cliente não precisa
-    # informar e-mail: usamos um endereço técnico válido exclusivamente
-    # para atender ao contrato da API.
-    email_tecnico = f"pagamento.{pagamento.referencia.lower()}@iptv-sistema.com"
+    # A API Order do PagBank exige email e tax_id no customer.
+    # O cliente NÃO precisa informar email na tela; usamos um email
+    # técnico configurado no Render para cumprir o contrato da API.
+    email_tecnico = PAGBANK_CUSTOMER_EMAIL or "pagamentos@iptv-sistema.com"
+    email_tecnico = email_tecnico.strip()
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email_tecnico):
+        raise RuntimeError(
+            "PAGBANK_CUSTOMER_EMAIL inválido. Configure no Render um e-mail válido, "
+            "por exemplo: pagamentos@seu-dominio.com"
+        )
 
     customer = {
         "name": nome_cliente,
@@ -1587,10 +1594,16 @@ def confirmar_pagamento():
         try:
             criar_pedido_pix(pagamento, db)
         except Exception as exc:
-            pagamento.status = "ERRO_CRIACAO"
-            pagamento.observacao = str(exc)[:2000]
-            db.commit()
+            db.rollback()
+            # Recarrega o registro após o rollback para evitar trabalhar
+            # com um objeto em estado transacional inválido.
+            pagamento = db.query(Pagamento).filter(Pagamento.id == pagamento_id).first()
+            if pagamento:
+                pagamento.status = "ERRO_CRIACAO"
+                pagamento.observacao = str(exc)[:2000]
+                db.commit()
 
+            traceback.print_exc()
             return render_template_string(
                 BASE_CSS + """
                 <div class="page"><div class="box">
