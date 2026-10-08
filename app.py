@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from functools import wraps
 
 from flask import Flask, request, redirect, url_for, session, render_template_string, flash, jsonify
-from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Text, func
+from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Text, func, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -116,6 +116,75 @@ class SistemaConfig(Base):
 
 
 Base.metadata.create_all(bind=engine)
+
+
+def garantir_schema():
+    """Garante colunas usadas pelo Sistema IPTV em bancos já existentes.
+    create_all() não adiciona colunas novas em tabelas antigas, por isso
+    fazemos uma migração compatível com PostgreSQL sem apagar dados.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+
+    tabelas = {
+        "clientes": {
+            "nome": "VARCHAR(150)",
+            "usuario": "VARCHAR(150)",
+            "valor": "DOUBLE PRECISION DEFAULT 0",
+            "vencimento": "DATE",
+            "status": "VARCHAR(20) DEFAULT 'Pendente'",
+            "data_pagamento": "TIMESTAMP",
+            "criado_em": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        },
+        "pagamentos": {
+            "referencia": "VARCHAR(80)",
+            "cliente_id": "INTEGER",
+            "nome_cliente": "VARCHAR(150)",
+            "usuario_cliente": "VARCHAR(150)",
+            "valor": "DOUBLE PRECISION DEFAULT 0",
+            "valor_centavos": "INTEGER DEFAULT 0",
+            "status": "VARCHAR(40) DEFAULT 'AGUARDANDO'",
+            "metodo": "VARCHAR(20) DEFAULT 'PIX'",
+            "pagbank_order_id": "VARCHAR(100)",
+            "pagbank_charge_id": "VARCHAR(100)",
+            "qr_code_text": "TEXT",
+            "qr_code_url": "TEXT",
+            "criado_em": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "pago_em": "TIMESTAMP",
+            "vencimento_gerado": "DATE",
+            "webhook_recebido_em": "TIMESTAMP",
+            "observacao": "TEXT",
+            "idempotency_key": "VARCHAR(100)",
+        },
+        "pagbank_webhook_eventos": {
+            "evento_id": "VARCHAR(180)",
+            "order_id": "VARCHAR(100)",
+            "charge_id": "VARCHAR(100)",
+            "payload_hash": "VARCHAR(64)",
+            "recebido_em": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "processado_em": "TIMESTAMP",
+            "status": "VARCHAR(30) DEFAULT 'RECEBIDO'",
+            "detalhe": "TEXT",
+        },
+        "pagbank_config": {
+            "chave": "VARCHAR(100)",
+            "valor": "TEXT",
+            "atualizado_em": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        },
+    }
+
+    with engine.begin() as conn:
+        insp = inspect(conn)
+        for tabela, colunas in tabelas.items():
+            if tabela not in insp.get_table_names():
+                continue
+            existentes = {c["name"] for c in inspect(conn).get_columns(tabela)}
+            for coluna, tipo in colunas.items():
+                if coluna not in existentes:
+                    conn.execute(text(f'ALTER TABLE "{tabela}" ADD COLUMN "{coluna}" {tipo}'))
+
+
+garantir_schema()
 
 
 def login_required(view):
@@ -1315,8 +1384,11 @@ def selecionar_cliente(cliente_id):
 
 @app.route("/confirmar-pagamento", methods=["POST"])
 def confirmar_pagamento():
+    """Cria o pagamento PIX com tratamento completo de erros.
+    Nenhuma exceção de banco/PagBank deve resultar em uma tela 500 genérica.
+    """
     if not validar_csrf(request.form.get("csrf")):
-        return "Solicitação inválida.", 400
+        return "Solicitação inválida. Atualize a página e tente novamente.", 400
 
     cliente_id = session.get("cliente_pagamento_id")
     if not cliente_id:
@@ -1328,32 +1400,26 @@ def confirmar_pagamento():
         return render_template_string(
             BASE_CSS + """
             <div class="page"><div class="box">
-              <div class="brand">
-                <div class="icon">⚠️</div>
-                <h1>Valor inválido</h1>
-              </div>
-              <div class="card">
-                <p class="err">{{ erro }}</p>
-                <a class="btn btn-secondary" href="{{ url_for('selecionar_cliente', cliente_id=cliente_id) }}">
-                  Voltar
-                </a>
+              <div class="brand"><div class="icon">⚠️</div><h1>Valor inválido</h1></div>
+              <div class="card"><p class="err">{{ erro }}</p>
+                <a class="btn btn-secondary" href="{{ url_for('selecionar_cliente', cliente_id=cliente_id) }}">Voltar</a>
               </div>
             </div></div>
             """,
-            erro=str(exc),
-            cliente_id=cliente_id,
+            erro=str(exc), cliente_id=cliente_id,
         ), 400
 
+    pagamento_id = None
+    referencia = None
+
+    # 1) Grava o pagamento localmente primeiro.
     db = SessionLocal()
     try:
         cliente = db.query(Cliente).filter(Cliente.id == cliente_id).first()
-
         if not cliente:
             return redirect(url_for("pagar"))
 
         referencia = "IPTV-" + secrets.token_urlsafe(18)
-        idempotency = str(uuid.uuid4())
-
         pagamento = Pagamento(
             referencia=referencia,
             cliente_id=cliente.id,
@@ -1363,47 +1429,69 @@ def confirmar_pagamento():
             valor_centavos=centavos,
             status="CRIANDO",
             metodo="PIX",
-            idempotency_key=idempotency,
+            idempotency_key=str(uuid.uuid4()),
             criado_em=agora_utc(),
         )
-
         db.add(pagamento)
         db.commit()
         pagamento_id = pagamento.id
+    except Exception as exc:
+        db.rollback()
+        return render_template_string(
+            BASE_CSS + """
+            <div class="page"><div class="box">
+              <div class="brand"><div class="icon">⚠️</div><h1>Não foi possível continuar</h1></div>
+              <div class="card">
+                <p class="err">Não foi possível registrar sua solicitação de pagamento.</p>
+                <p class="small">Verifique as configurações do sistema e tente novamente.</p>
+                <a class="btn btn-secondary" href="{{ url_for('pagar') }}">Voltar</a>
+              </div>
+            </div></div>
+            """,
+        ), 500
     finally:
         db.close()
 
+    # 2) Cria a cobrança no PagBank.
     db = SessionLocal()
     try:
         pagamento = db.query(Pagamento).filter(Pagamento.id == pagamento_id).first()
+        if not pagamento:
+            raise RuntimeError("Pagamento local não encontrado após o cadastro.")
 
         try:
             criar_pedido_pix(pagamento)
         except Exception as exc:
             pagamento.status = "ERRO_CRIACAO"
-            pagamento.observacao = str(exc)[:1000]
+            pagamento.observacao = str(exc)[:2000]
             db.commit()
 
             return render_template_string(
                 BASE_CSS + """
                 <div class="page"><div class="box">
-                  <div class="brand">
-                    <div class="icon">⚠️</div>
-                    <h1>Não foi possível gerar o PIX</h1>
-                  </div>
+                  <div class="brand"><div class="icon">⚠️</div><h1>Não foi possível gerar o PIX</h1></div>
                   <div class="card">
-                    <p class="err">
-                      A cobrança não foi criada. Tente novamente em alguns instantes.
-                    </p>
-                    <a class="btn btn-secondary" href="{{ url_for('pagar') }}">
-                      Voltar
-                    </a>
+                    <p class="err">A cobrança não foi criada pelo PagBank.</p>
+                    <p class="small">Confira o token do PagBank, o ambiente configurado e tente novamente.</p>
+                    <a class="btn btn-secondary" href="{{ url_for('pagar') }}">Voltar</a>
                   </div>
                 </div></div>
                 """,
             ), 502
 
         return redirect(url_for("pix", referencia=pagamento.referencia))
+    except Exception:
+        db.rollback()
+        return render_template_string(
+            BASE_CSS + """
+            <div class="page"><div class="box">
+              <div class="brand"><div class="icon">⚠️</div><h1>Não foi possível continuar</h1></div>
+              <div class="card"><p class="err">O sistema não conseguiu finalizar a criação do pagamento.</p>
+                <a class="btn btn-secondary" href="{{ url_for('pagar') }}">Voltar</a>
+              </div>
+            </div></div>
+            """,
+        ), 500
     finally:
         db.close()
 
