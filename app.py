@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from functools import wraps
 
 from flask import Flask, request, redirect, url_for, session, render_template_string, flash
-from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, func
+from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Text, func
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.security import check_password_hash, generate_password_hash
