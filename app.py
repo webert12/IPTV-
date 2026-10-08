@@ -48,6 +48,7 @@ APP_PUBLIC_URL = os.getenv("APP_PUBLIC_URL", "https://iptv-renovacao.onrender.co
 PAGBANK_TOKEN = os.getenv("PAGBANK_TOKEN", "").strip()
 PAGBANK_ENV = os.getenv("PAGBANK_ENV", "production").strip().lower()
 PAGBANK_TIMEOUT = int(os.getenv("PAGBANK_TIMEOUT", "25"))
+PAGBANK_CUSTOMER_EMAIL = os.getenv("PAGBANK_CUSTOMER_EMAIL", "").strip()
 PAGBANK_BASE_URL = (
     "https://api.pagseguro.com"
     if PAGBANK_ENV == "production"
@@ -788,8 +789,11 @@ def public_url(path=""):
 
 
 def pagbank_headers(idempotency_key=None):
+    token = PAGBANK_TOKEN.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
     headers = {
-        "Authorization": f"Bearer {PAGBANK_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
@@ -851,8 +855,22 @@ def criar_pedido_pix(pagamento):
 
     expiracao = datetime.now(timezone.utc) + timedelta(minutes=30)
 
+    # A API Order do PagBank exige o objeto customer.
+    # O sistema IPTV não coleta CPF/e-mail do cliente, então enviamos
+    # somente o nome, que é suficiente para o objeto customer.
+    nome_cliente = " ".join(str(pagamento.nome_cliente or "Cliente IPTV").split()).strip()
+    if len(nome_cliente.split()) == 1:
+        nome_cliente = f"{nome_cliente} Cliente"
+    if len(nome_cliente) > 120:
+        nome_cliente = nome_cliente[:120].strip()
+
+    customer = {"name": nome_cliente}
+    if PAGBANK_CUSTOMER_EMAIL:
+        customer["email"] = PAGBANK_CUSTOMER_EMAIL
+
     payload = {
         "reference_id": pagamento.referencia,
+        "customer": customer,
         "items": [
             {
                 "reference_id": pagamento.referencia,
@@ -891,9 +909,13 @@ def criar_pedido_pix(pagamento):
 
     if resposta.status_code not in (200, 201):
         erro = json_response_error(resposta)
+        try:
+            detalhe = json.dumps(erro, ensure_ascii=False)
+        except Exception:
+            detalhe = str(erro)
         raise RuntimeError(
-            f"PagBank recusou a criação do PIX ({resposta.status_code}): "
-            f"{json.dumps(erro, ensure_ascii=False)[:800]}"
+            f"PagBank recusou a criação do PIX (HTTP {resposta.status_code}). "
+            f"Resposta: {detalhe[:1200]}"
         )
 
     dados = resposta.json()
@@ -1472,11 +1494,14 @@ def confirmar_pagamento():
                   <div class="brand"><div class="icon">⚠️</div><h1>Não foi possível gerar o PIX</h1></div>
                   <div class="card">
                     <p class="err">A cobrança não foi criada pelo PagBank.</p>
-                    <p class="small">Confira o token do PagBank, o ambiente configurado e tente novamente.</p>
+                    <p class="small">{{ erro_pagbank }}</p>
+                    <p class="small">Ambiente: {{ ambiente }}. Se aparecer <strong>403 / ACCESS_DENIED</strong>, a API de pedidos em produção precisa estar liberada para sua conta PagBank.</p>
                     <a class="btn btn-secondary" href="{{ url_for('pagar') }}">Voltar</a>
                   </div>
                 </div></div>
                 """,
+                erro_pagbank=str(exc)[:1500],
+                ambiente=PAGBANK_ENV,
             ), 502
 
         return redirect(url_for("pix", referencia=pagamento.referencia))
