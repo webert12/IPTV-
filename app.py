@@ -332,10 +332,11 @@ button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:10px;backg
 """
 
 
-def page(content, title, active):
+def page(content, title, active, **context):
+    """Renderiza o conteúdo da página mantendo disponíveis as variáveis do template."""
     return render_template_string(
         BASE,
-        content=render_template_string(content),
+        content=render_template_string(content, **context),
         title=title,
         active=active,
     )
@@ -454,7 +455,7 @@ def clientes():
 {% endfor %}
 {% else %}<div class="card empty">Nenhum cliente encontrado.</div>{% endif %}
 """
-        return page(content, "Clientes", "clientes")
+        return page(content, "Clientes", "clientes", lista=lista, busca=busca, status=status, dinheiro=dinheiro)
     finally:
         db.close()
 
