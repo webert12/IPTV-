@@ -585,8 +585,11 @@ def alternar_status(cliente_id):
             cliente.status = "Pendente"
             cliente.data_pagamento = None
         else:
+            # Ao confirmar manualmente o pagamento, renova o vencimento
+            # para o dia 10 do próximo mês.
             cliente.status = "Pago"
-            cliente.data_pagamento = datetime.utcnow()
+            cliente.data_pagamento = agora_utc()
+            cliente.vencimento = proximo_vencimento()
 
         db.commit()
         flash("Status atualizado.")
@@ -776,7 +779,8 @@ def parse_centavos(valor_bruto):
 
 
 def proximo_vencimento():
-    hoje = date.today()
+    # Usa a data do Brasil (UTC-3), evitando diferença de dia no servidor.
+    hoje = datetime.now(timezone(timedelta(hours=-3))).date()
     if hoje.month == 12:
         return date(hoje.year + 1, 1, 10)
     return date(hoje.year, hoje.month + 1, 10)
@@ -1119,6 +1123,11 @@ def extrair_dados_pagbank(payload):
 
 
 def processar_pagamento_pago(db, pagamento, valor_confirmado):
+    # Evita renovar novamente quando o PagBank reenvia a confirmação do
+    # mesmo pagamento já processado.
+    if pagamento.status == "PAGO" and pagamento.vencimento_gerado:
+        return True
+
     if valor_confirmado is not None:
         try:
             valor_confirmado = int(valor_confirmado)
